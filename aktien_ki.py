@@ -16,27 +16,83 @@ if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
 # ── WKN → TICKER ─────────────────────────────────────────────────────────────
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+def _yahoo_search(query):
+    for host in ["query1", "query2"]:
+        try:
+            url = (
+                f"https://{host}.finance.yahoo.com/v1/finance/search"
+                f"?q={query}&lang=de-DE&region=DE&quotesCount=8&newsCount=0"
+            )
+            r = requests.get(url, timeout=5, headers=HEADERS)
+            quotes = r.json().get("quotes", [])
+            if quotes:
+                return quotes
+        except Exception:
+            continue
+    return []
+
+def _best_ticker(quotes):
+    for suffix in [".DE", ".F", ".MU", ".BE"]:
+        for q in quotes:
+            if q.get("symbol", "").endswith(suffix):
+                return q.get("symbol"), q.get("longname") or q.get("shortname")
+    if quotes:
+        q = quotes[0]
+        return q.get("symbol"), q.get("longname") or q.get("shortname")
+    return None, None
+
 @st.cache_data(ttl=86400)
 def wkn_zu_ticker(wkn):
-    """Löst eine WKN via Yahoo Finance Search in ein Ticker-Symbol auf."""
+    """
+    Löst eine WKN in ein Ticker-Symbol auf.
+    Strategie 1: Direkte WKN-Suche bei Yahoo Finance
+    Strategie 2: OpenFIGI API (kostenfrei, kein Key nötig)
+    Strategie 3: ISIN-Ableitung (DE000 + WKN)
+    """
     wkn = wkn.strip().upper()
+
+    # Strategie 1: Yahoo direkt
+    quotes = _yahoo_search(wkn)
+    ticker, name = _best_ticker(quotes)
+    if ticker:
+        return ticker, name
+
+    # Strategie 2: OpenFIGI
     try:
-        url = (
-            "https://query1.finance.yahoo.com/v1/finance/search"
-            f"?q={wkn}&lang=de-DE&region=DE&quotesCount=5&newsCount=0"
+        r = requests.post(
+            "https://api.openfigi.com/v3/mapping",
+            json=[{"idType": "ID_WERTPAPIER", "idValue": wkn, "exchCode": "GR"}],
+            timeout=6, headers=HEADERS
         )
-        r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
-        quotes = r.json().get("quotes", [])
-        # Bevorzuge XETRA (.DE), sonst ersten Treffer
-        for q in quotes:
-            sym = q.get("symbol", "")
-            if sym.endswith(".DE"):
-                return sym, q.get("longname") or q.get("shortname") or sym
-        if quotes:
-            sym = quotes[0].get("symbol", "")
-            return sym, quotes[0].get("longname") or quotes[0].get("shortname") or sym
+        results = r.json()
+        if results and isinstance(results, list) and results[0].get("data"):
+            d    = results[0]["data"][0]
+            name = d.get("name", wkn)
+            raw  = d.get("ticker", "")
+            if raw:
+                candidate = raw + ".DE"
+                test = yf.Ticker(candidate).history(period="5d")
+                if not test.empty:
+                    return candidate, name
+                quotes2 = _yahoo_search(raw)
+                t2, n2  = _best_ticker(quotes2)
+                if t2:
+                    return t2, n2 or name
     except Exception:
         pass
+
+    # Strategie 3: ISIN-Ableitung
+    for isin in ["DE000" + wkn, "DE" + wkn]:
+        try:
+            quotes3 = _yahoo_search(isin)
+            t3, n3  = _best_ticker(quotes3)
+            if t3:
+                return t3, n3
+        except Exception:
+            pass
+
     return None, None
 
 # ── DATEN ─────────────────────────────────────────────────────────────────────
