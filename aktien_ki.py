@@ -115,15 +115,46 @@ def trefferquote(m, X, df, h=20):
     return out
 
 # ── DIVIDENDEN ────────────────────────────────────────────────────────────────
-def div_info(divs, preis, n_aktien, meta_yield):
+def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
     heute = pd.Timestamp.now()
+
+    # ── Manuelle Überschreibung hat Vorrang ──────────────────────────────────
+    if manuell_div > 0:
+        pa   = manuell_div
+        yld  = pa / preis * 100 if preis > 0 else 0
+        # Zahlungsrhythmus aus Historie ableiten (falls vorhanden)
+        iv = 12
+        naechste_str = "unbekannt"
+        if divs is not None and not divs.empty:
+            nz_hist = len(divs[divs.index >= heute - pd.DateOffset(years=1)])
+            iv = 12 if nz_hist <= 1 else (6 if nz_hist <= 2 else (3 if nz_hist <= 4 else 1))
+            letzte = divs.index[-1]
+            naechste = letzte + pd.DateOffset(months=iv)
+            naechste_str = naechste.strftime("%d.%m.%Y")
+        dpz  = pa  # jährlich → eine Zahlung
+        z6   = 1 if iv >= 6 else (2 if iv == 3 else 6)
+        z1   = 12 // iv if iv > 0 else 1
+        g6   = dpz * (z6 / z1) * n_aktien
+        g1   = dpz * n_aktien
+        return {
+            "yield": yld, "pa": pa,
+            "g6": g6, "g1": g1,
+            "r6": g6 / (preis * n_aktien) * 100 if preis > 0 and n_aktien > 0 else 0,
+            "r1": yld,
+            "z6": z6, "z1": z1,
+            "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv, "-"),
+            "next": naechste_str,
+            "quelle": "⚠️ Manuell eingegeben",
+        }
+
+    # ── Automatisch aus yfinance Historie ────────────────────────────────────
     if divs is not None and not divs.empty:
         recent = divs[divs.index >= heute - pd.DateOffset(years=1)]
-        pa = float(recent.sum()) if not recent.empty else 0
+        pa  = float(recent.sum()) if not recent.empty else 0
         yld = pa / preis * 100 if preis > 0 else meta_yield * 100
-        nz = len(recent)
-        letzte = divs.index[-1]
-        iv = 12 if nz <= 1 else (6 if nz <= 2 else (3 if nz <= 4 else 1))
+        nz  = len(recent)
+        letzte   = divs.index[-1]
+        iv  = 12 if nz <= 1 else (6 if nz <= 2 else (3 if nz <= 4 else 1))
         naechste = letzte + pd.DateOffset(months=iv)
         dpz = pa / nz if nz > 0 else 0
         z6, z1 = 0, 0
@@ -141,12 +172,15 @@ def div_info(divs, preis, n_aktien, meta_yield):
             "z6": z6, "z1": z1,
             "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv, "-"),
             "next": naechste.strftime("%d.%m.%Y"),
+            "quelle": "📡 yfinance (kann veraltet sein)",
         }
+
     yld = meta_yield * 100
-    pa = preis * meta_yield
+    pa  = preis * meta_yield
     return {"yield": yld, "pa": pa, "g6": 0, "g1": pa * n_aktien,
             "r6": 0, "r1": yld, "z6": 0, "z1": 1 if yld > 0 else 0,
-            "iv": "jährlich", "next": "unbekannt"}
+            "iv": "jährlich", "next": "unbekannt",
+            "quelle": "📡 yfinance (kann veraltet sein)"}
 
 # ── MONTE CARLO ───────────────────────────────────────────────────────────────
 def monte_carlo(df, tage, n=1000, seed=42, div_pa=0):
@@ -163,13 +197,13 @@ def monte_carlo(df, tage, n=1000, seed=42, div_pa=0):
 def kz(paths, kauf):
     ep = paths[:, -1]
     return {
-        "p5": float(np.percentile(ep, 5)),
-        "p25": float(np.percentile(ep, 25)),
-        "p50": float(np.percentile(ep, 50)),
-        "p75": float(np.percentile(ep, 75)),
-        "p95": float(np.percentile(ep, 95)),
+        "p5":   float(np.percentile(ep, 5)),
+        "p25":  float(np.percentile(ep, 25)),
+        "p50":  float(np.percentile(ep, 50)),
+        "p75":  float(np.percentile(ep, 75)),
+        "p95":  float(np.percentile(ep, 95)),
         "gwkt": float(np.mean(ep > kauf)),
-        "ret": float((np.percentile(ep, 50) - kauf) / kauf * 100),
+        "ret":  float((np.percentile(ep, 50) - kauf) / kauf * 100),
     }
 
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
@@ -252,19 +286,30 @@ st.title("📈 KI-Aktien-Terminal Pro")
 st.caption("Technische Analyse · KI-Signal · Monte-Carlo-Prognose · Dividenden")
 st.warning("Nur für Bildungszwecke — keine Finanzberatung.")
 
-# Sidebar
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.header("Einstellungen")
-ticker    = st.sidebar.text_input("Ticker", "BMW.DE").upper()
-zeitraum  = st.sidebar.selectbox("Historie", ["1y", "2y", "5y"], index=2)
-n_sim     = st.sidebar.select_slider("Simulationen", [500, 1000, 5000], value=1000)
-horizont  = st.sidebar.multiselect("Prognose", ["6 Monate", "1 Jahr"],
-                                    default=["6 Monate", "1 Jahr"])
+ticker   = st.sidebar.text_input("Ticker", "BMW.DE").upper()
+zeitraum = st.sidebar.selectbox("Historie", ["1y", "2y", "5y"], index=2)
+n_sim    = st.sidebar.select_slider("Simulationen", [500, 1000, 5000], value=1000)
+horizont = st.sidebar.multiselect("Prognose", ["6 Monate", "1 Jahr"],
+                                   default=["6 Monate", "1 Jahr"])
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Risiko**")
-kapital   = st.sidebar.number_input("Kapital (EUR)", min_value=100, value=5000, step=100)
-rp        = st.sidebar.number_input("Max. Verlust (%)", min_value=1, max_value=50, value=5)
+kapital  = st.sidebar.number_input("Kapital (EUR)", min_value=100, value=5000, step=100)
+rp       = st.sidebar.number_input("Max. Verlust (%)", min_value=1, max_value=50, value=5)
+
+# ── NEU: Manuelle Dividenden-Überschreibung ───────────────────────────────────
 st.sidebar.markdown("---")
-start     = st.sidebar.button("Analyse starten", use_container_width=True)
+st.sidebar.markdown("**Dividende (optional)**")
+st.sidebar.caption("yfinance kann veraltet sein. Hier aktuelle Dividende/Aktie pro Jahr eingeben:")
+manuell_div = st.sidebar.number_input(
+    "Dividende p.a. (EUR/Aktie)",
+    min_value=0.0, value=0.0, step=0.10, format="%.2f",
+    help="z.B. 24.00 für Munich Re 2025. Leer lassen = automatisch aus yfinance."
+)
+
+st.sidebar.markdown("---")
+start = st.sidebar.button("Analyse starten", use_container_width=True)
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Watchlist**")
 for w in st.session_state.watchlist:
@@ -274,7 +319,7 @@ if st.sidebar.button("+ Hinzufuegen"):
     if wl_neu and wl_neu.upper() not in st.session_state.watchlist:
         st.session_state.watchlist.append(wl_neu.upper())
 
-# Analyse
+# ── Analyse ───────────────────────────────────────────────────────────────────
 if start:
     with st.spinner("Lade Daten..."):
         df_raw, divs, meta = lade_daten(ticker, zeitraum)
@@ -294,13 +339,13 @@ if start:
         tq = trefferquote(m, X, df_f)
 
     with st.spinner("Monte Carlo..."):
-        preis   = float(df["Close"].iloc[-1])
-        rsi     = float(df["RSI"].iloc[-1])
-        sma20   = float(df["SMA20"].iloc[-1])
-        sma50   = float(df["SMA50"].iloc[-1])
-        macd_h  = float(df["MACD_H"].iloc[-1])
-        bb_u    = float(df["BB_U"].iloc[-1])
-        bb_l    = float(df["BB_L"].iloc[-1])
+        preis  = float(df["Close"].iloc[-1])
+        rsi    = float(df["RSI"].iloc[-1])
+        sma20  = float(df["SMA20"].iloc[-1])
+        sma50  = float(df["SMA50"].iloc[-1])
+        macd_h = float(df["MACD_H"].iloc[-1])
+        bb_u   = float(df["BB_U"].iloc[-1])
+        bb_l   = float(df["BB_L"].iloc[-1])
 
         sig, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h)
         emoji = {"KAUFEN": "🟢", "VERKAUFEN": "🔴", "HALTEN": "🟡"}[sig]
@@ -314,7 +359,7 @@ if start:
         inv   = nakt * preis
         rvmax = nakt * vpa
 
-        dv = div_info(divs, preis, nakt, meta.get("div_yield", 0))
+        dv = div_info(divs, preis, nakt, meta.get("div_yield", 0), manuell_div)
         p6, mu, sigma = monte_carlo(df, 126, n_sim, div_pa=dv["yield"]/100)
         p1, _,  _     = monte_carlo(df, 252, n_sim, div_pa=dv["yield"]/100)
         k6 = kz(p6, preis)
@@ -326,11 +371,18 @@ if start:
 
     # Metriken
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Preis",         f"{preis:.2f}")
-    c2.metric("RSI",           f"{rsi:.1f}")
-    c3.metric("KI-Konfidenz",  f"{konf*100:.0f}%")
-    c4.metric("Accuracy",      f"{acc*100:.0f}%")
-    c5.metric("Div.-Rendite",  f"{dv['yield']:.1f}%")
+    c1.metric("Preis",        f"{preis:.2f}")
+    c2.metric("RSI",          f"{rsi:.1f}")
+    c3.metric("KI-Konfidenz", f"{konf*100:.0f}%")
+    c4.metric("Accuracy",     f"{acc*100:.0f}%")
+    c5.metric("Div.-Rendite", f"{dv['yield']:.1f}%",
+              help=dv.get("quelle", ""))
+
+    # Hinweis wenn manuell
+    if manuell_div > 0:
+        st.info(f"⚠️ Dividende manuell überschrieben: **{manuell_div:.2f} EUR/Aktie** "
+                f"({dv['yield']:.2f}% bei aktuellem Kurs). "
+                f"yfinance-Wert wurde ignoriert.")
 
     st.markdown("---")
 
@@ -355,10 +407,10 @@ if start:
     with col_ris:
         st.markdown("**Risiko-Plan**")
         r1c, r2c = st.columns(2)
-        r1c.metric("Aktien",     str(nakt) + " Stk")
-        r2c.metric("Investition",f"{inv:.0f} EUR")
-        r1c.metric("Stop-Loss",  f"{sl:.2f}")
-        r2c.metric("Max. Verlust", f"{rvmax:.0f} EUR")
+        r1c.metric("Aktien",      str(nakt) + " Stk")
+        r2c.metric("Investition", f"{inv:.0f} EUR")
+        r1c.metric("Stop-Loss",   f"{sl:.2f}")
+        r2c.metric("Max. Verlust",f"{rvmax:.0f} EUR")
 
     st.markdown("---")
 
@@ -368,10 +420,10 @@ if start:
         d1c, d2c, d3c, d4c = st.columns(4)
         d1c.metric("Rendite p.a.", f"{dv['yield']:.1f}%")
         d2c.metric("Pro Aktie",    f"{dv['pa']:.2f} EUR")
-        d3c.metric("Deine Div. 6M", f"{dv['g6']:.0f} EUR")
-        d4c.metric("Deine Div. 1J", f"{dv['g1']:.0f} EUR")
+        d3c.metric("Deine Div. 6M",f"{dv['g6']:.0f} EUR")
+        d4c.metric("Deine Div. 1J",f"{dv['g1']:.0f} EUR")
         st.info(f"Rhythmus: {dv['iv']}  |  Naechste Zahlung ca. {dv['next']}  |  "
-                f"6M: {dv['z6']}x  |  1J: {dv['z1']}x")
+                f"6M: {dv['z6']}x  |  1J: {dv['z1']}x  |  Quelle: {dv.get('quelle','')}")
 
     st.markdown("---")
 
@@ -388,25 +440,23 @@ if start:
             m1c, m2c, m3c = st.columns(3)
             m1c.metric("Erwarteter Kurs", f"{k6['p50']:.2f}",
                        f"{k6['ret']:+.1f}% Kursgewinn",
-                       help="Median aus 1000 Szenarien — in 50% der Faelle liegt er hoeher")
+                       help="Median aus Szenarien — in 50% der Faelle liegt er hoeher")
             m2c.metric("Guenstiges Szenario", f"{k6['p75']:.2f}",
-                       f"{(k6['p75']-preis)/preis*100:+.1f}%",
-                       help="In 25% der Faelle liegt der Kurs noch hoeher")
+                       f"{(k6['p75']-preis)/preis*100:+.1f}%")
             m3c.metric("Schlechtes Szenario", f"{k6['p25']:.2f}",
-                       f"{(k6['p25']-preis)/preis*100:+.1f}%",
-                       help="In 25% der Faelle liegt der Kurs noch tiefer")
+                       f"{(k6['p25']-preis)/preis*100:+.1f}%")
             st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g6tot}%",
-                      delta_color=g6col,
-                      help="Wahrscheinlichster Gewinn wenn du heute kaufst und 6 Monate haeltst")
+                      delta_color=g6col)
             gwkt6 = round(k6['gwkt']*100)
-            gwkt6_color = "normal" if gwkt6 >= 55 else ("off" if gwkt6 >= 45 else "inverse")
             st.metric(
                 label=f"In {gwkt6}% der Szenarien machst du Gewinn",
                 value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
                 delta=f"Maximal {rvmax:.0f} EUR Verlust",
                 delta_color="inverse"
             )
-            st.caption(f"Extremfall ohne Stop-Loss: unten {k6['p5']:.0f} ({(k6['p5']-preis)/preis*100:+.0f}%) | oben {k6['p95']:.0f} ({(k6['p95']-preis)/preis*100:+.0f}%)")
+            st.caption(f"Extremfall ohne Stop-Loss: unten {k6['p5']:.0f} "
+                       f"({(k6['p5']-preis)/preis*100:+.0f}%) | "
+                       f"oben {k6['p95']:.0f} ({(k6['p95']-preis)/preis*100:+.0f}%)")
 
     if "1 Jahr" in horizont:
         with pr2:
@@ -415,17 +465,13 @@ if start:
             g1col = "normal" if g1tot >= 0 else "inverse"
             m1c, m2c, m3c = st.columns(3)
             m1c.metric("Erwarteter Kurs", f"{k1['p50']:.2f}",
-                       f"{k1['ret']:+.1f}% Kursgewinn",
-                       help="Median aus 1000 Szenarien — in 50% der Faelle liegt er hoeher")
+                       f"{k1['ret']:+.1f}% Kursgewinn")
             m2c.metric("Guenstiges Szenario", f"{k1['p75']:.2f}",
-                       f"{(k1['p75']-preis)/preis*100:+.1f}%",
-                       help="In 25% der Faelle liegt der Kurs noch hoeher")
+                       f"{(k1['p75']-preis)/preis*100:+.1f}%")
             m3c.metric("Schlechtes Szenario", f"{k1['p25']:.2f}",
-                       f"{(k1['p25']-preis)/preis*100:+.1f}%",
-                       help="In 25% der Faelle liegt der Kurs noch tiefer")
+                       f"{(k1['p25']-preis)/preis*100:+.1f}%")
             st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g1tot}%",
-                      delta_color=g1col,
-                      help="Wahrscheinlichster Gewinn wenn du heute kaufst und 1 Jahr haeltst")
+                      delta_color=g1col)
             gwkt1 = round(k1['gwkt']*100)
             st.metric(
                 label=f"In {gwkt1}% der Szenarien machst du Gewinn",
@@ -433,7 +479,9 @@ if start:
                 delta=f"Maximal {rvmax:.0f} EUR Verlust",
                 delta_color="inverse"
             )
-            st.caption(f"Extremfall ohne Stop-Loss: unten {k1['p5']:.0f} ({(k1['p5']-preis)/preis*100:+.0f}%) | oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
+            st.caption(f"Extremfall ohne Stop-Loss: unten {k1['p5']:.0f} "
+                       f"({(k1['p5']-preis)/preis*100:+.0f}%) | "
+                       f"oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
 
     st.plotly_chart(chart_prognose(df, p6, p1, preis, ticker), use_container_width=True)
 
