@@ -117,6 +117,45 @@ def lade_daten(ticker, zeitraum):
     except Exception:
         return None, None, {}
 
+# ── ANALYSTEN ────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def lade_analysten(ticker):
+    try:
+        obj  = yf.Ticker(ticker)
+        info = obj.info
+        # Kursziel & Empfehlung
+        ziel      = info.get("targetMeanPrice")
+        ziel_low  = info.get("targetLowPrice")
+        ziel_high = info.get("targetHighPrice")
+        empf      = info.get("recommendationKey", "")  # buy, hold, sell, ...
+        n_analyst = info.get("numberOfAnalystOpinions", 0)
+
+        # Ratings-Verteilung
+        ratings = {
+            "Starker Kauf": info.get("recommendationMean", None),
+        }
+
+        # Aktuelle Ratings-Tabelle (letzte Einträge)
+        try:
+            rec_df = obj.recommendations
+            if rec_df is not None and not rec_df.empty:
+                rec_df = rec_df.tail(10).copy()
+            else:
+                rec_df = None
+        except Exception:
+            rec_df = None
+
+        return {
+            "ziel":      ziel,
+            "ziel_low":  ziel_low,
+            "ziel_high": ziel_high,
+            "empf":      empf,
+            "n":         n_analyst,
+            "rec_df":    rec_df,
+        }
+    except Exception:
+        return {}
+
 # ── INDIKATOREN ───────────────────────────────────────────────────────────────
 def indikatoren(df):
     c = df["Close"].copy()
@@ -547,6 +586,47 @@ if start:
         d4c.metric("Deine Div. 1J", f"{dv['g1']:.0f} EUR")
         st.info(f"Rhythmus: {dv['iv']}  |  Nächste Zahlung ca. {dv['next']}  |  "
                 f"6M: {dv['z6']}x  |  1J: {dv['z1']}x  |  Quelle: {dv.get('quelle','')}")
+
+    st.markdown("---")
+
+    # ── Analysten ─────────────────────────────────────────────────────────────
+    ana = lade_analysten(ticker)
+    if ana and ana.get("ziel"):
+        st.subheader("🎯 Analystenbewertungen & Kursziele")
+
+        # Empfehlung leserlich machen
+        empf_map = {
+            "strong_buy":  ("Starker Kauf",  "🟢"),
+            "buy":         ("Kaufen",         "🟢"),
+            "hold":        ("Halten",         "🟡"),
+            "underperform":("Unterperformen", "🔴"),
+            "sell":        ("Verkaufen",      "🔴"),
+        }
+        empf_txt, empf_ico = empf_map.get(ana.get("empf",""), ("Keine Angabe", "⚪"))
+        upside = ((ana["ziel"] - preis) / preis * 100) if preis > 0 else 0
+
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Konsensus", f"{empf_ico} {empf_txt}")
+        a2.metric("Analysten", f"{ana['n']} Meinungen")
+        a3.metric("Ø Kursziel", f"{ana['ziel']:.2f} EUR",
+                  f"{upside:+.1f}% zum aktuellen Kurs")
+        a4.metric("Kursziel-Spanne",
+                  f"{ana['ziel_low']:.0f} – {ana['ziel_high']:.0f} EUR")
+
+        # Fortschrittsbalken: Kurs vs. Kursziel
+        if ana.get("ziel_low") and ana.get("ziel_high"):
+            spanne = ana["ziel_high"] - ana["ziel_low"]
+            if spanne > 0:
+                pos_pct = max(0.0, min(1.0, (preis - ana["ziel_low"]) / spanne))
+                st.caption(f"Kursziel-Spanne: {ana['ziel_low']:.0f} EUR ◀─── aktuell: {preis:.2f} EUR ───▶ {ana['ziel_high']:.0f} EUR")
+                st.progress(pos_pct)
+
+        # Letzte Einzelratings
+        if ana.get("rec_df") is not None:
+            with st.expander("Letzte Einzelratings anzeigen"):
+                st.dataframe(ana["rec_df"], use_container_width=True)
+    else:
+        st.info("Keine Analystendaten für diese Aktie verfügbar.")
 
     st.markdown("---")
 
