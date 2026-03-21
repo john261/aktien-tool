@@ -1,2 +1,467 @@
 import streamlit as st
-st.write("Schritt 1 OK")
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import accuracy_score
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+
+st.set_page_config(page_title="KI-Aktien-Terminal Pro", page_icon="📈", layout="wide")
+
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = ["BMW.DE", "MUV2.DE", "SAP.DE"]
+
+# ── DATEN ────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def lade_daten(ticker, zeitraum):
+    try:
+        obj = yf.Ticker(ticker)
+        df = obj.history(period=zeitraum, auto_adjust=True)
+        if df.empty or len(df) < 100:
+            return None, None, {}
+        df.index = df.index.tz_localize(None)
+        divs = obj.dividends
+        if not divs.empty:
+            divs.index = divs.index.tz_localize(None)
+        info = obj.info
+        meta = {
+            "name": info.get("longName", ticker),
+            "div_yield": info.get("dividendYield", 0) or 0,
+            "sector": info.get("sector", "-"),
+        }
+        return df, divs, meta
+    except Exception:
+        return None, None, {}
+
+# ── INDIKATOREN ───────────────────────────────────────────────────────────────
+def indikatoren(df):
+    c = df["Close"].copy()
+    df["SMA20"] = c.rolling(20).mean()
+    df["SMA50"] = c.rolling(50).mean()
+    delta = c.diff()
+    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+    df["RSI"] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    ema12 = c.ewm(span=12, adjust=False).mean()
+    ema26 = c.ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
+    df["MACD_Sig"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_H"] = df["MACD"] - df["MACD_Sig"]
+    sma20 = c.rolling(20).mean()
+    std20 = c.rolling(20).std()
+    df["BB_U"] = sma20 + 2 * std20
+    df["BB_L"] = sma20 - 2 * std20
+    df["BB_W"] = (df["BB_U"] - df["BB_L"]) / sma20
+    df["BB_P"] = (c - df["BB_L"]) / (df["BB_U"] - df["BB_L"] + 1e-9)
+    tr = pd.concat([df["High"]-df["Low"],
+                    (df["High"]-c.shift()).abs(),
+                    (df["Low"]-c.shift()).abs()], axis=1).max(axis=1)
+    df["ATR"] = tr.ewm(com=13, adjust=False).mean()
+    df["VR"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1)
+    df["R1"] = c.pct_change(1)
+    df["R5"] = c.pct_change(5)
+    df["Target"] = np.where(c.shift(-1) > c, 1, 0)
+    return df.dropna()
+
+FCOLS = ["RSI","MACD_H","BB_P","BB_W","VR","R1","R5","TR"]
+
+def features(df):
+    df = df.copy()
+    df["TR"] = (df["SMA20"] > df["SMA50"]).astype(int)
+    for col in FCOLS:
+        df[col+"_l"] = df[col].shift(1)
+    lag = [c+"_l" for c in FCOLS]
+    return df.dropna(), lag
+
+# ── MODELL ────────────────────────────────────────────────────────────────────
+def modell(df, lag):
+    X, y = df[lag], df["Target"]
+    split = int(len(X) * 0.8)
+    base = GradientBoostingClassifier(n_estimators=100, max_depth=3,
+                                      learning_rate=0.05, random_state=42)
+    m = CalibratedClassifierCV(base, cv=3, method="isotonic")
+    m.fit(X.iloc[:split], y.iloc[:split])
+    acc = accuracy_score(y.iloc[split:], m.predict(X.iloc[split:]))
+    prob = m.predict_proba(X.iloc[[-1]])[0][1]
+    imp = None
+    try:
+        imp = dict(zip(FCOLS, m.calibrated_classifiers_[0].estimator.feature_importances_))
+    except Exception:
+        pass
+    return prob, acc, imp, m, X
+
+# ── TREFFERQUOTE ─────────────────────────────────────────────────────────────
+def trefferquote(m, X, df, h=20):
+    probs = m.predict_proba(X)[:, 1]
+    sigs = np.where(probs > 0.55, "KAUFEN", np.where(probs < 0.45, "VERKAUFEN", "HALTEN"))
+    closes = df["Close"].values
+    res = {"KAUFEN": [], "VERKAUFEN": []}
+    for i, sig in enumerate(sigs):
+        if sig == "HALTEN": continue
+        if i + h >= len(closes): continue
+        r = (closes[i+h] - closes[i]) / closes[i] * 100
+        res[sig].append(r)
+    out = {}
+    for sig in ["KAUFEN", "VERKAUFEN"]:
+        w = res[sig]
+        if not w:
+            out[sig] = {"n": 0, "pct": 0, "ret": 0}
+            continue
+        tr = sum(1 for r in w if (r > 0 if sig == "KAUFEN" else r < 0))
+        out[sig] = {"n": len(w), "pct": tr/len(w)*100, "ret": float(np.mean(w))}
+    return out
+
+# ── DIVIDENDEN ────────────────────────────────────────────────────────────────
+def div_info(divs, preis, n_aktien, meta_yield):
+    heute = pd.Timestamp.now()
+    if divs is not None and not divs.empty:
+        recent = divs[divs.index >= heute - pd.DateOffset(years=1)]
+        pa = float(recent.sum()) if not recent.empty else 0
+        yld = pa / preis * 100 if preis > 0 else meta_yield * 100
+        nz = len(recent)
+        letzte = divs.index[-1]
+        iv = 12 if nz <= 1 else (6 if nz <= 2 else (3 if nz <= 4 else 1))
+        naechste = letzte + pd.DateOffset(months=iv)
+        dpz = pa / nz if nz > 0 else 0
+        z6, z1 = 0, 0
+        t = naechste
+        while t <= heute + pd.DateOffset(months=6):
+            z6 += 1; t += pd.DateOffset(months=iv)
+        t = naechste
+        while t <= heute + pd.DateOffset(years=1):
+            z1 += 1; t += pd.DateOffset(months=iv)
+        return {
+            "yield": yld, "pa": pa,
+            "g6": dpz * z6 * n_aktien, "g1": dpz * z1 * n_aktien,
+            "r6": dpz * z6 / preis * 100 if preis > 0 else 0,
+            "r1": dpz * z1 / preis * 100 if preis > 0 else 0,
+            "z6": z6, "z1": z1,
+            "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv, "-"),
+            "next": naechste.strftime("%d.%m.%Y"),
+        }
+    yld = meta_yield * 100
+    pa = preis * meta_yield
+    return {"yield": yld, "pa": pa, "g6": 0, "g1": pa * n_aktien,
+            "r6": 0, "r1": yld, "z6": 0, "z1": 1 if yld > 0 else 0,
+            "iv": "jährlich", "next": "unbekannt"}
+
+# ── MONTE CARLO ───────────────────────────────────────────────────────────────
+def monte_carlo(df, tage, n=1000, seed=42, div_pa=0):
+    np.random.seed(seed)
+    lr = np.log(df["Close"] / df["Close"].shift(1)).dropna()
+    mu = float(lr.mean()) + div_pa / 252
+    sigma = float(lr.std())
+    S0 = float(df["Close"].iloc[-1])
+    r = np.random.normal(mu - 0.5*sigma**2, sigma, (n, tage))
+    p = S0 * np.exp(np.cumsum(r, axis=1))
+    p = np.hstack([np.full((n, 1), S0), p])
+    return p, mu, sigma
+
+def kz(paths, kauf):
+    ep = paths[:, -1]
+    return {
+        "p5": float(np.percentile(ep, 5)),
+        "p25": float(np.percentile(ep, 25)),
+        "p50": float(np.percentile(ep, 50)),
+        "p75": float(np.percentile(ep, 75)),
+        "p95": float(np.percentile(ep, 95)),
+        "gwkt": float(np.mean(ep > kauf)),
+        "ret": float((np.percentile(ep, 50) - kauf) / kauf * 100),
+    }
+
+# ── SIGNAL ────────────────────────────────────────────────────────────────────
+def signal(prob, rsi, sma20, sma50, macd_h):
+    g, s = [], 0.0
+    s += (prob - 0.5) * 2 * 0.5
+    g.append(f"ML: {prob*100:.1f}%")
+    if rsi < 30:   s += 0.25; g.append(f"RSI {rsi:.0f} - ueberverkauft")
+    elif rsi > 70: s -= 0.25; g.append(f"RSI {rsi:.0f} - ueberkauft")
+    elif rsi < 45: s -= 0.10; g.append(f"RSI {rsi:.0f} - leicht baerisch")
+    elif rsi > 55: s += 0.10; g.append(f"RSI {rsi:.0f} - leicht bullisch")
+    else:          g.append(f"RSI {rsi:.0f} - neutral")
+    if sma20 > sma50: s += 0.15; g.append("SMA20 > SMA50 - Aufwaertstrend")
+    else:             s -= 0.15; g.append("SMA20 < SMA50 - Abwaertstrend")
+    if macd_h > 0: s += 0.10; g.append("MACD positiv")
+    else:          s -= 0.10; g.append("MACD negativ")
+    sig = "KAUFEN" if s > 0.15 else ("VERKAUFEN" if s < -0.15 else "HALTEN")
+    return sig, min(abs(s)/0.55, 1.0), g, s
+
+# ── CHARTS ────────────────────────────────────────────────────────────────────
+def chart_prognose(df, p6, p1, kauf, ticker):
+    heute = df.index[-1]
+    d6 = [heute + timedelta(days=i) for i in range(p6.shape[1])]
+    d1 = [heute + timedelta(days=i) for i in range(p1.shape[1])]
+    fig = go.Figure()
+    hist = df["Close"].tail(252)
+    fig.add_trace(go.Scatter(x=list(hist.index), y=list(hist.values),
+                             name="Historisch", line=dict(color="#c8cdd8", width=1.8)))
+    pc = lambda p, q: list(np.percentile(p, q, axis=0))
+    fig.add_trace(go.Scatter(x=d1, y=pc(p1, 95), showlegend=False,
+                             line=dict(color="rgba(0,0,0,0)", width=0)))
+    fig.add_trace(go.Scatter(x=d1, y=pc(p1, 5), name="90%-Band",
+                             line=dict(color="rgba(0,0,0,0)", width=0),
+                             fill="tonexty", fillcolor="rgba(74,158,255,0.10)"))
+    fig.add_trace(go.Scatter(x=d1, y=pc(p1, 75), showlegend=False,
+                             line=dict(color="rgba(0,0,0,0)", width=0)))
+    fig.add_trace(go.Scatter(x=d1, y=pc(p1, 25), name="50%-Band",
+                             line=dict(color="rgba(0,0,0,0)", width=0),
+                             fill="tonexty", fillcolor="rgba(74,158,255,0.18)"))
+    fig.add_trace(go.Scatter(x=d1, y=pc(p1, 50), name="Median 1J",
+                             line=dict(color="#4a9eff", width=2, dash="dot")))
+    fig.add_trace(go.Scatter(x=d6, y=pc(p6, 50), name="Median 6M",
+                             line=dict(color="#f0a000", width=2, dash="dot")))
+    fig.add_hline(y=kauf, line_dash="dash", line_color="rgba(255,77,106,0.7)")
+    fig.update_layout(template="plotly_dark", height=450,
+                      title=ticker + " - Monte Carlo Prognose",
+                      paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14")
+    return fig
+
+def chart_tech(df, ticker):
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                        row_heights=[0.6, 0.2, 0.2])
+    fig.add_trace(go.Candlestick(x=list(df.index), open=list(df["Open"]),
+                                 high=list(df["High"]), low=list(df["Low"]),
+                                 close=list(df["Close"]), name="Kurs",
+                                 increasing_line_color="#00c87a",
+                                 decreasing_line_color="#ff4d6a"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=list(df.index), y=list(df["SMA20"]),
+                             name="SMA20", line=dict(color="#f0a000", width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=list(df.index), y=list(df["SMA50"]),
+                             name="SMA50", line=dict(color="#4a9eff", width=1.8)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=list(df.index), y=list(df["RSI"]),
+                             name="RSI", line=dict(color="#c084fc", width=1.5)), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="rgba(255,100,100,0.4)", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="rgba(100,200,100,0.4)", row=2, col=1)
+    colors = ["#00c87a" if v >= 0 else "#ff4d6a" for v in df["MACD_H"]]
+    fig.add_trace(go.Bar(x=list(df.index), y=list(df["MACD_H"]),
+                         name="MACD Hist", marker_color=colors), row=3, col=1)
+    fig.add_trace(go.Scatter(x=list(df.index), y=list(df["MACD"]),
+                             name="MACD", line=dict(color="#f0a000", width=1.2)), row=3, col=1)
+    fig.update_layout(template="plotly_dark", height=560,
+                      xaxis_rangeslider_visible=False,
+                      paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14")
+    return fig
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APP
+# ═══════════════════════════════════════════════════════════════════════════════
+st.title("📈 KI-Aktien-Terminal Pro")
+st.caption("Technische Analyse · KI-Signal · Monte-Carlo-Prognose · Dividenden")
+st.warning("Nur für Bildungszwecke — keine Finanzberatung.")
+
+# Sidebar
+st.sidebar.header("Einstellungen")
+ticker    = st.sidebar.text_input("Ticker", "BMW.DE").upper()
+zeitraum  = st.sidebar.selectbox("Historie", ["1y", "2y", "5y"], index=2)
+n_sim     = st.sidebar.select_slider("Simulationen", [500, 1000, 5000], value=1000)
+horizont  = st.sidebar.multiselect("Prognose", ["6 Monate", "1 Jahr"],
+                                    default=["6 Monate", "1 Jahr"])
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Risiko**")
+kapital   = st.sidebar.number_input("Kapital (EUR)", min_value=100, value=5000, step=100)
+rp        = st.sidebar.number_input("Max. Verlust (%)", min_value=1, max_value=50, value=5)
+st.sidebar.markdown("---")
+start     = st.sidebar.button("Analyse starten", use_container_width=True)
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Watchlist**")
+for w in st.session_state.watchlist:
+    st.sidebar.markdown("- " + w)
+wl_neu = st.sidebar.text_input("Hinzufuegen", "")
+if st.sidebar.button("+ Hinzufuegen"):
+    if wl_neu and wl_neu.upper() not in st.session_state.watchlist:
+        st.session_state.watchlist.append(wl_neu.upper())
+
+# Analyse
+if start:
+    with st.spinner("Lade Daten..."):
+        df_raw, divs, meta = lade_daten(ticker, zeitraum)
+
+    if df_raw is None:
+        st.error("Keine Daten. Tipp: .DE fuer deutsche Aktien (z.B. BMW.DE)")
+        st.stop()
+
+    with st.spinner("Berechne Indikatoren..."):
+        df = indikatoren(df_raw.copy())
+
+    with st.spinner("Trainiere Modell..."):
+        df_f, lag = features(df)
+        prob, acc, imp, m, X = modell(df_f, lag)
+
+    with st.spinner("Trefferquote..."):
+        tq = trefferquote(m, X, df_f)
+
+    with st.spinner("Monte Carlo..."):
+        preis   = float(df["Close"].iloc[-1])
+        rsi     = float(df["RSI"].iloc[-1])
+        sma20   = float(df["SMA20"].iloc[-1])
+        sma50   = float(df["SMA50"].iloc[-1])
+        macd_h  = float(df["MACD_H"].iloc[-1])
+        bb_u    = float(df["BB_U"].iloc[-1])
+        bb_l    = float(df["BB_L"].iloc[-1])
+
+        sig, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h)
+        emoji = {"KAUFEN": "🟢", "VERKAUFEN": "🔴", "HALTEN": "🟡"}[sig]
+
+        sl    = preis * (1 - rp / 100)
+        vpa   = preis - sl
+        mveur = kapital * (rp / 100)
+        nris  = int(mveur / vpa) if vpa > 0 else 0
+        nkap  = int(kapital / preis)
+        nakt  = min(nris, nkap)
+        inv   = nakt * preis
+        rvmax = nakt * vpa
+
+        dv = div_info(divs, preis, nakt, meta.get("div_yield", 0))
+        p6, mu, sigma = monte_carlo(df, 126, n_sim, div_pa=dv["yield"]/100)
+        p1, _,  _     = monte_carlo(df, 252, n_sim, div_pa=dv["yield"]/100)
+        k6 = kz(p6, preis)
+        k1 = kz(p1, preis)
+
+    # Header
+    st.subheader(meta.get("name", ticker) + " (" + ticker + ")")
+    st.caption("Sektor: " + meta.get("sector", "-"))
+
+    # Metriken
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Preis",         f"{preis:.2f}")
+    c2.metric("RSI",           f"{rsi:.1f}")
+    c3.metric("KI-Konfidenz",  f"{konf*100:.0f}%")
+    c4.metric("Accuracy",      f"{acc*100:.0f}%")
+    c5.metric("Div.-Rendite",  f"{dv['yield']:.1f}%")
+
+    st.markdown("---")
+
+    # Signal + Risiko
+    col_sig, col_ris = st.columns([3, 2])
+    with col_sig:
+        st.subheader(emoji + " Signal: " + sig)
+        st.caption(f"Konfidenz {konf*100:.0f}%  |  ML {prob*100:.0f}%")
+        t = tq.get(sig, {})
+        if t and t.get("n", 0) > 5:
+            st.markdown(f"**Trefferquote:** {t['pct']:.0f}% ({t['n']} Faelle)  "
+                        f"  |  Avg. Rendite: **{t['ret']:+.1f}%**")
+        else:
+            st.info("Zu wenige Signale fuer Trefferquote.")
+        st.markdown("**Indikatoren:**")
+        for g in gruende:
+            bull = any(k in g for k in ["ueberverkauft","bullisch","Aufwaerts","positiv"])
+            bear = any(k in g for k in ["ueberkauft","baerisch","Abwaerts","negativ"])
+            ico  = "🟢" if bull else ("🔴" if bear else "🟡")
+            st.markdown(ico + " " + g)
+
+    with col_ris:
+        st.markdown("**Risiko-Plan**")
+        r1c, r2c = st.columns(2)
+        r1c.metric("Aktien",     str(nakt) + " Stk")
+        r2c.metric("Investition",f"{inv:.0f} EUR")
+        r1c.metric("Stop-Loss",  f"{sl:.2f}")
+        r2c.metric("Max. Verlust", f"{rvmax:.0f} EUR")
+
+    st.markdown("---")
+
+    # Dividenden
+    if dv["yield"] > 0:
+        st.subheader("💰 Dividenden")
+        d1c, d2c, d3c, d4c = st.columns(4)
+        d1c.metric("Rendite p.a.", f"{dv['yield']:.1f}%")
+        d2c.metric("Pro Aktie",    f"{dv['pa']:.2f} EUR")
+        d3c.metric("Deine Div. 6M", f"{dv['g6']:.0f} EUR")
+        d4c.metric("Deine Div. 1J", f"{dv['g1']:.0f} EUR")
+        st.info(f"Rhythmus: {dv['iv']}  |  Naechste Zahlung ca. {dv['next']}  |  "
+                f"6M: {dv['z6']}x  |  1J: {dv['z1']}x")
+
+    st.markdown("---")
+
+    # Prognose
+    st.subheader("🔭 Langfrist-Prognose")
+    st.caption(f"Drift: {mu*252*100:.1f}% p.a.  |  Vola: {sigma*252**0.5*100:.1f}% p.a.")
+    pr1, pr2 = st.columns(2)
+
+    if "6 Monate" in horizont:
+        with pr1:
+            st.markdown("#### In 6 Monaten — kaufst du heute")
+            g6tot = round(k6["ret"] + dv["r6"], 1)
+            g6col = "normal" if g6tot >= 0 else "inverse"
+            m1c, m2c, m3c = st.columns(3)
+            m1c.metric("Erwarteter Kurs", f"{k6['p50']:.2f}",
+                       f"{k6['ret']:+.1f}% Kursgewinn",
+                       help="Median aus 1000 Szenarien — in 50% der Faelle liegt er hoeher")
+            m2c.metric("Guenstiges Szenario", f"{k6['p75']:.2f}",
+                       f"{(k6['p75']-preis)/preis*100:+.1f}%",
+                       help="In 25% der Faelle liegt der Kurs noch hoeher")
+            m3c.metric("Schlechtes Szenario", f"{k6['p25']:.2f}",
+                       f"{(k6['p25']-preis)/preis*100:+.1f}%",
+                       help="In 25% der Faelle liegt der Kurs noch tiefer")
+            st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g6tot}%",
+                      delta_color=g6col,
+                      help="Wahrscheinlichster Gewinn wenn du heute kaufst und 6 Monate haeltst")
+            gwkt6 = round(k6['gwkt']*100)
+            gwkt6_color = "normal" if gwkt6 >= 55 else ("off" if gwkt6 >= 45 else "inverse")
+            st.metric(
+                label=f"In {gwkt6}% der Szenarien machst du Gewinn",
+                value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
+                delta=f"Maximal {rvmax:.0f} EUR Verlust",
+                delta_color="inverse"
+            )
+            st.caption(f"Extremfall ohne Stop-Loss: unten {k6['p5']:.0f} ({(k6['p5']-preis)/preis*100:+.0f}%) | oben {k6['p95']:.0f} ({(k6['p95']-preis)/preis*100:+.0f}%)")
+
+    if "1 Jahr" in horizont:
+        with pr2:
+            st.markdown("#### In 1 Jahr — kaufst du heute")
+            g1tot = round(k1["ret"] + dv["r1"], 1)
+            g1col = "normal" if g1tot >= 0 else "inverse"
+            m1c, m2c, m3c = st.columns(3)
+            m1c.metric("Erwarteter Kurs", f"{k1['p50']:.2f}",
+                       f"{k1['ret']:+.1f}% Kursgewinn",
+                       help="Median aus 1000 Szenarien — in 50% der Faelle liegt er hoeher")
+            m2c.metric("Guenstiges Szenario", f"{k1['p75']:.2f}",
+                       f"{(k1['p75']-preis)/preis*100:+.1f}%",
+                       help="In 25% der Faelle liegt der Kurs noch hoeher")
+            m3c.metric("Schlechtes Szenario", f"{k1['p25']:.2f}",
+                       f"{(k1['p25']-preis)/preis*100:+.1f}%",
+                       help="In 25% der Faelle liegt der Kurs noch tiefer")
+            st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g1tot}%",
+                      delta_color=g1col,
+                      help="Wahrscheinlichster Gewinn wenn du heute kaufst und 1 Jahr haeltst")
+            gwkt1 = round(k1['gwkt']*100)
+            st.metric(
+                label=f"In {gwkt1}% der Szenarien machst du Gewinn",
+                value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
+                delta=f"Maximal {rvmax:.0f} EUR Verlust",
+                delta_color="inverse"
+            )
+            st.caption(f"Extremfall ohne Stop-Loss: unten {k1['p5']:.0f} ({(k1['p5']-preis)/preis*100:+.0f}%) | oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
+
+    st.plotly_chart(chart_prognose(df, p6, p1, preis, ticker), use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📊 Technische Analyse")
+    st.plotly_chart(chart_tech(df, ticker), use_container_width=True)
+
+    with st.expander("KI-Details"):
+        e1, e2 = st.columns([3, 2])
+        with e1:
+            sp = int((score + 0.55) / 1.10 * 100)
+            sp = max(0, min(100, sp))
+            st.markdown(f"**Score:** {score:+.2f}  |  {sig}")
+            st.progress(sp / 100)
+            st.caption(f"Bollinger: Oben {bb_u:.2f}  Unten {bb_l:.2f}")
+        with e2:
+            if imp:
+                lbl = list(imp.keys())
+                val = list(imp.values())
+                idx = sorted(range(len(val)), key=lambda i: val[i])
+                fig_i = go.Figure(go.Bar(
+                    x=[val[i] for i in idx], y=[lbl[i] for i in idx],
+                    orientation="h", marker_color="#4a9eff"))
+                fig_i.update_layout(height=220, template="plotly_dark",
+                                    paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14",
+                                    margin=dict(l=5,r=5,t=5,b=5))
+                st.plotly_chart(fig_i, use_container_width=True)
+
+    with st.expander("Rohdaten (letzte 30 Tage)"):
+        cols = ["Open","High","Low","Close","Volume","SMA20","SMA50","RSI","MACD","ATR"]
+        st.dataframe(df[cols].tail(30).style.format("{:.2f}"), use_container_width=True)
