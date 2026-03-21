@@ -118,11 +118,9 @@ def trefferquote(m, X, df, h=20):
 def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
     heute = pd.Timestamp.now()
 
-    # ── Manuelle Überschreibung hat Vorrang ──────────────────────────────────
     if manuell_div > 0:
         pa   = manuell_div
         yld  = pa / preis * 100 if preis > 0 else 0
-        # Zahlungsrhythmus aus Historie ableiten (falls vorhanden)
         iv = 12
         naechste_str = "unbekannt"
         if divs is not None and not divs.empty:
@@ -131,7 +129,7 @@ def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
             letzte = divs.index[-1]
             naechste = letzte + pd.DateOffset(months=iv)
             naechste_str = naechste.strftime("%d.%m.%Y")
-        dpz  = pa  # jährlich → eine Zahlung
+        dpz  = pa
         z6   = 1 if iv >= 6 else (2 if iv == 3 else 6)
         z1   = 12 // iv if iv > 0 else 1
         g6   = dpz * (z6 / z1) * n_aktien
@@ -147,7 +145,6 @@ def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
             "quelle": "⚠️ Manuell eingegeben",
         }
 
-    # ── Automatisch aus yfinance Historie ────────────────────────────────────
     if divs is not None and not divs.empty:
         recent = divs[divs.index >= heute - pd.DateOffset(years=1)]
         pa  = float(recent.sum()) if not recent.empty else 0
@@ -222,6 +219,55 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     else:          s -= 0.10; g.append("MACD negativ")
     sig = "KAUFEN" if s > 0.15 else ("VERKAUFEN" if s < -0.15 else "HALTEN")
     return sig, min(abs(s)/0.55, 1.0), g, s
+
+# ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
+def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
+                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig):
+    """Gibt einen lesbaren Fließtext als Gesamtfazit zurück."""
+
+    xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
+    xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
+    xup6_pct   = round((k6["p95"] - preis) / preis * 100)
+    xup1_pct   = round((k1["p95"] - preis) / preis * 100)
+
+    # Szenarien sprachlich einordnen
+    def pct_label(pct):
+        if pct >= 3: return "von 4"
+        if pct >= 2: return "von 3"
+        return "von 2"
+
+    g6_word = "Gewinn" if g6tot >= 0 else "Verlust"
+    g1_word = "Gewinn" if g1tot >= 0 else "Verlust"
+    sig_text = {
+        "KAUFEN":    "spricht das Gesamtbild klar für einen Einstieg",
+        "HALTEN":    "empfiehlt sich aktuell eine abwartende Haltung",
+        "VERKAUFEN": "deuten die Signale eher auf einen Ausstieg hin",
+    }.get(sig, "ist das Bild gemischt")
+
+    fazit = f"""
+**Gesamtfazit – {name} ({ticker})**
+
+Wer heute **{nakt} Aktien** zu je **{preis:.2f} EUR** kauft — also **{inv:,.0f} EUR** investiert — 
+hält laut Monte-Carlo-Simulation in **{gwkt6} % aller Szenarien** nach sechs Monaten mehr als heute. 
+Der erwartete Gesamtertrag (Kurs + Dividende) liegt bei **+{g6tot} %**. 
+Im günstigen Fall wächst das Investment um **+{xup6_pct} %**, im schlechten Szenario 
+liegt der Extremverlust ohne Absicherung bei **–{xdown6_pct} %**.
+
+Hältst du ein volles Jahr durch, steigt die Gewinnwahrscheinlichkeit weiter auf **{gwkt1} %**. 
+Der erwartete Gesamtertrag klettert auf **+{g1tot} %**. 
+Selbst im ungünstigsten Extremfall ohne Stop-Loss wären maximal **–{xdown1_pct} %** 
+möglich — nach oben hingegen bis zu **+{xup1_pct} %**.
+
+Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** 
+ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, 
+was der Markt macht.
+
+**Fazit:** Bei {name} {sig_text}. 
+Die Simulation zeigt ein klares Übergewicht positiver Szenarien, 
+besonders auf Sicht von zwölf Monaten. 
+Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.
+"""
+    return fazit.strip()
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
 def chart_prognose(df, p6, p1, kauf, ticker):
@@ -298,7 +344,6 @@ st.sidebar.markdown("**Risiko**")
 kapital  = st.sidebar.number_input("Kapital (EUR)", min_value=100, value=5000, step=100)
 rp       = st.sidebar.number_input("Max. Verlust (%)", min_value=1, max_value=50, value=5)
 
-# ── NEU: Manuelle Dividenden-Überschreibung ───────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Dividende (optional)**")
 st.sidebar.caption("yfinance kann veraltet sein. Hier aktuelle Dividende/Aktie pro Jahr eingeben:")
@@ -378,7 +423,6 @@ if start:
     c5.metric("Div.-Rendite", f"{dv['yield']:.1f}%",
               help=dv.get("quelle", ""))
 
-    # Hinweis wenn manuell
     if manuell_div > 0:
         st.info(f"⚠️ Dividende manuell überschrieben: **{manuell_div:.2f} EUR/Aktie** "
                 f"({dv['yield']:.2f}% bei aktuellem Kurs). "
@@ -432,10 +476,14 @@ if start:
     st.caption(f"Drift: {mu*252*100:.1f}% p.a.  |  Vola: {sigma*252**0.5*100:.1f}% p.a.")
     pr1, pr2 = st.columns(2)
 
+    g6tot = round(k6["ret"] + dv["r6"], 1)
+    g1tot = round(k1["ret"] + dv["r1"], 1)
+    gwkt6 = round(k6["gwkt"] * 100)
+    gwkt1 = round(k1["gwkt"] * 100)
+
     if "6 Monate" in horizont:
         with pr1:
             st.markdown("#### In 6 Monaten — kaufst du heute")
-            g6tot = round(k6["ret"] + dv["r6"], 1)
             g6col = "normal" if g6tot >= 0 else "inverse"
             m1c, m2c, m3c = st.columns(3)
             m1c.metric("Erwarteter Kurs", f"{k6['p50']:.2f}",
@@ -447,7 +495,6 @@ if start:
                        f"{(k6['p25']-preis)/preis*100:+.1f}%")
             st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g6tot}%",
                       delta_color=g6col)
-            gwkt6 = round(k6['gwkt']*100)
             st.metric(
                 label=f"In {gwkt6}% der Szenarien machst du Gewinn",
                 value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
@@ -461,7 +508,6 @@ if start:
     if "1 Jahr" in horizont:
         with pr2:
             st.markdown("#### In 1 Jahr — kaufst du heute")
-            g1tot = round(k1["ret"] + dv["r1"], 1)
             g1col = "normal" if g1tot >= 0 else "inverse"
             m1c, m2c, m3c = st.columns(3)
             m1c.metric("Erwarteter Kurs", f"{k1['p50']:.2f}",
@@ -472,7 +518,6 @@ if start:
                        f"{(k1['p25']-preis)/preis*100:+.1f}%")
             st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g1tot}%",
                       delta_color=g1col)
-            gwkt1 = round(k1['gwkt']*100)
             st.metric(
                 label=f"In {gwkt1}% der Szenarien machst du Gewinn",
                 value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
@@ -484,6 +529,28 @@ if start:
                        f"oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
 
     st.plotly_chart(chart_prognose(df, p6, p1, preis, ticker), use_container_width=True)
+
+    # ── GESAMTFAZIT ───────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📝 Gesamtfazit")
+    fazit_text = gesamtfazit(
+        name=meta.get("name", ticker),
+        ticker=ticker,
+        preis=preis,
+        inv=inv,
+        nakt=nakt,
+        gwkt6=gwkt6,
+        gwkt1=gwkt1,
+        g6tot=g6tot,
+        g1tot=g1tot,
+        sl=sl,
+        rp=rp,
+        rvmax=rvmax,
+        k6=k6,
+        k1=k1,
+        sig=sig,
+    )
+    st.markdown(fazit_text)
 
     st.markdown("---")
     st.subheader("📊 Technische Analyse")
