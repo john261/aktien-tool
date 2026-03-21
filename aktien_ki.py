@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import accuracy_score
@@ -12,9 +13,33 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="KI-Aktien-Terminal Pro", page_icon="📈", layout="wide")
 
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["BMW.DE", "MUV2.DE", "SAP.DE"]
+    st.session_state.watchlist = []
 
-# ── DATEN ────────────────────────────────────────────────────────────────────
+# ── WKN → TICKER ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=86400)
+def wkn_zu_ticker(wkn):
+    """Löst eine WKN via Yahoo Finance Search in ein Ticker-Symbol auf."""
+    wkn = wkn.strip().upper()
+    try:
+        url = (
+            "https://query1.finance.yahoo.com/v1/finance/search"
+            f"?q={wkn}&lang=de-DE&region=DE&quotesCount=5&newsCount=0"
+        )
+        r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
+        quotes = r.json().get("quotes", [])
+        # Bevorzuge XETRA (.DE), sonst ersten Treffer
+        for q in quotes:
+            sym = q.get("symbol", "")
+            if sym.endswith(".DE"):
+                return sym, q.get("longname") or q.get("shortname") or sym
+        if quotes:
+            sym = quotes[0].get("symbol", "")
+            return sym, quotes[0].get("longname") or quotes[0].get("shortname") or sym
+    except Exception:
+        pass
+    return None, None
+
+# ── DATEN ─────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def lade_daten(ticker, zeitraum):
     try:
@@ -93,7 +118,7 @@ def modell(df, lag):
         pass
     return prob, acc, imp, m, X
 
-# ── TREFFERQUOTE ─────────────────────────────────────────────────────────────
+# ── TREFFERQUOTE ──────────────────────────────────────────────────────────────
 def trefferquote(m, X, df, h=20):
     probs = m.predict_proba(X)[:, 1]
     sigs = np.where(probs > 0.55, "KAUFEN", np.where(probs < 0.45, "VERKAUFEN", "HALTEN"))
@@ -117,11 +142,10 @@ def trefferquote(m, X, df, h=20):
 # ── DIVIDENDEN ────────────────────────────────────────────────────────────────
 def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
     heute = pd.Timestamp.now()
-
     if manuell_div > 0:
-        pa   = manuell_div
-        yld  = pa / preis * 100 if preis > 0 else 0
-        iv = 12
+        pa  = manuell_div
+        yld = pa / preis * 100 if preis > 0 else 0
+        iv  = 12
         naechste_str = "unbekannt"
         if divs is not None and not divs.empty:
             nz_hist = len(divs[divs.index >= heute - pd.DateOffset(years=1)])
@@ -129,28 +153,24 @@ def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
             letzte = divs.index[-1]
             naechste = letzte + pd.DateOffset(months=iv)
             naechste_str = naechste.strftime("%d.%m.%Y")
-        dpz  = pa
-        z6   = 1 if iv >= 6 else (2 if iv == 3 else 6)
-        z1   = 12 // iv if iv > 0 else 1
-        g6   = dpz * (z6 / z1) * n_aktien
-        g1   = dpz * n_aktien
+        dpz = pa
+        z6  = 1 if iv >= 6 else (2 if iv == 3 else 6)
+        z1  = 12 // iv if iv > 0 else 1
+        g6  = dpz * (z6 / z1) * n_aktien
+        g1  = dpz * n_aktien
         return {
-            "yield": yld, "pa": pa,
-            "g6": g6, "g1": g1,
+            "yield": yld, "pa": pa, "g6": g6, "g1": g1,
             "r6": g6 / (preis * n_aktien) * 100 if preis > 0 and n_aktien > 0 else 0,
-            "r1": yld,
-            "z6": z6, "z1": z1,
-            "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv, "-"),
-            "next": naechste_str,
-            "quelle": "⚠️ Manuell eingegeben",
+            "r1": yld, "z6": z6, "z1": z1,
+            "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv,"-"),
+            "next": naechste_str, "quelle": "⚠️ Manuell eingegeben",
         }
-
     if divs is not None and not divs.empty:
         recent = divs[divs.index >= heute - pd.DateOffset(years=1)]
         pa  = float(recent.sum()) if not recent.empty else 0
         yld = pa / preis * 100 if preis > 0 else meta_yield * 100
         nz  = len(recent)
-        letzte   = divs.index[-1]
+        letzte  = divs.index[-1]
         iv  = 12 if nz <= 1 else (6 if nz <= 2 else (3 if nz <= 4 else 1))
         naechste = letzte + pd.DateOffset(months=iv)
         dpz = pa / nz if nz > 0 else 0
@@ -167,17 +187,14 @@ def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
             "r6": dpz * z6 / preis * 100 if preis > 0 else 0,
             "r1": dpz * z1 / preis * 100 if preis > 0 else 0,
             "z6": z6, "z1": z1,
-            "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv, "-"),
-            "next": naechste.strftime("%d.%m.%Y"),
-            "quelle": "📡 yfinance (kann veraltet sein)",
+            "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv,"-"),
+            "next": naechste.strftime("%d.%m.%Y"), "quelle": "📡 yfinance (kann veraltet sein)",
         }
-
     yld = meta_yield * 100
     pa  = preis * meta_yield
     return {"yield": yld, "pa": pa, "g6": 0, "g1": pa * n_aktien,
             "r6": 0, "r1": yld, "z6": 0, "z1": 1 if yld > 0 else 0,
-            "iv": "jährlich", "next": "unbekannt",
-            "quelle": "📡 yfinance (kann veraltet sein)"}
+            "iv": "jährlich", "next": "unbekannt", "quelle": "📡 yfinance (kann veraltet sein)"}
 
 # ── MONTE CARLO ───────────────────────────────────────────────────────────────
 def monte_carlo(df, tage, n=1000, seed=42, div_pa=0):
@@ -223,51 +240,44 @@ def signal(prob, rsi, sma20, sma50, macd_h):
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 g6tot, g1tot, sl, rp, rvmax, k6, k1, sig):
-    """Gibt einen lesbaren Fließtext als Gesamtfazit zurück."""
-
     xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
     xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
     xup1_pct   = round((k1["p95"] - preis) / preis * 100)
 
-    # Szenarien sprachlich einordnen
-    def pct_label(pct):
-        if pct >= 3: return "von 4"
-        if pct >= 2: return "von 3"
-        return "von 2"
-
-    g6_word = "Gewinn" if g6tot >= 0 else "Verlust"
-    g1_word = "Gewinn" if g1tot >= 0 else "Verlust"
     sig_text = {
         "KAUFEN":    "spricht das Gesamtbild klar für einen Einstieg",
         "HALTEN":    "empfiehlt sich aktuell eine abwartende Haltung",
         "VERKAUFEN": "deuten die Signale eher auf einen Ausstieg hin",
     }.get(sig, "ist das Bild gemischt")
 
-    fazit = f"""
+    if gwkt1 >= 80:
+        risiko_einschaetzung = "Das Chance-Risiko-Verhältnis fällt deutlich positiv aus — die Simulation zeigt ein klares Übergewicht profitabler Szenarien."
+    elif gwkt1 >= 65:
+        risiko_einschaetzung = "Das Chance-Risiko-Verhältnis ist insgesamt ausgeglichen, mit einem leichten Vorteil auf der Gewinnseite."
+    else:
+        risiko_einschaetzung = "Das Chance-Risiko-Verhältnis verdient besondere Aufmerksamkeit — mehr als ein Drittel der Szenarien endet im Minus."
+
+    return f"""
 **Gesamtfazit – {name} ({ticker})**
 
-Wer heute **{nakt} Aktien** zu je **{preis:.2f} EUR** kauft — also **{inv:,.0f} EUR** investiert — 
-hält laut Monte-Carlo-Simulation in **{gwkt6} % aller Szenarien** nach sechs Monaten mehr als heute. 
-Der erwartete Gesamtertrag (Kurs + Dividende) liegt bei **+{g6tot} %**. 
-Im günstigen Fall wächst das Investment um **+{xup6_pct} %**, im schlechten Szenario 
+Wer heute **{nakt} Aktien** zu je **{preis:.2f} EUR** kauft — also **{inv:,.0f} EUR** investiert — \
+hält laut Monte-Carlo-Simulation in **{gwkt6} % aller Szenarien** nach sechs Monaten mehr als heute. \
+Der erwartete Gesamtertrag (Kurs + Dividende) liegt bei **+{g6tot} %**. \
+Im günstigen Fall wächst das Investment um **+{xup6_pct} %**, im schlechten Szenario \
 liegt der Extremverlust ohne Absicherung bei **–{xdown6_pct} %**.
 
-Hältst du ein volles Jahr durch, steigt die Gewinnwahrscheinlichkeit weiter auf **{gwkt1} %**. 
-Der erwartete Gesamtertrag klettert auf **+{g1tot} %**. 
-Selbst im ungünstigsten Extremfall ohne Stop-Loss wären maximal **–{xdown1_pct} %** 
+Hältst du ein volles Jahr durch, steigt die Gewinnwahrscheinlichkeit weiter auf **{gwkt1} %**. \
+Der erwartete Gesamtertrag klettert auf **+{g1tot} %**. \
+Selbst im ungünstigsten Extremfall ohne Stop-Loss wären maximal **–{xdown1_pct} %** \
 möglich — nach oben hingegen bis zu **+{xup1_pct} %**.
 
-Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** 
-ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, 
-was der Markt macht.
+Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** \
+ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, was der Markt macht.
 
-**Fazit:** Bei {name} {sig_text}. 
-Die Simulation zeigt ein klares Übergewicht positiver Szenarien, 
-besonders auf Sicht von zwölf Monaten. 
+**Fazit:** Bei {name} {sig_text}. {risiko_einschaetzung} \
 Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.
-"""
-    return fazit.strip()
+""".strip()
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
 def chart_prognose(df, p6, p1, kauf, ticker):
@@ -334,56 +344,72 @@ st.warning("Nur für Bildungszwecke — keine Finanzberatung.")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.header("Einstellungen")
-ticker   = st.sidebar.text_input("Ticker", "BMW.DE").upper()
-zeitraum = st.sidebar.selectbox("Historie", ["1y", "2y", "5y"], index=2)
-n_sim    = st.sidebar.select_slider("Simulationen", [500, 1000, 5000], value=1000)
-horizont = st.sidebar.multiselect("Prognose", ["6 Monate", "1 Jahr"],
-                                   default=["6 Monate", "1 Jahr"])
+
+wkn_input = st.sidebar.text_input(
+    "WKN eingeben",
+    placeholder="z.B. 843002",
+    max_chars=6,
+    help="6-stellige Wertpapierkennnummer, z.B. 843002 für Munich Re"
+).strip().upper()
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Risiko**")
-kapital  = st.sidebar.number_input("Kapital (EUR)", min_value=100, value=5000, step=100)
-rp       = st.sidebar.number_input("Max. Verlust (%)", min_value=1, max_value=50, value=5)
+kapital = st.sidebar.number_input("Kapital (EUR)", min_value=100, value=5000, step=100)
+rp      = st.sidebar.number_input("Max. Verlust (%)", min_value=1, max_value=50, value=5)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Dividende (optional)**")
-st.sidebar.caption("yfinance kann veraltet sein. Hier aktuelle Dividende/Aktie pro Jahr eingeben:")
+st.sidebar.caption("Falls yfinance veraltet ist: aktuelle Dividende/Aktie pro Jahr eingeben.")
 manuell_div = st.sidebar.number_input(
     "Dividende p.a. (EUR/Aktie)",
     min_value=0.0, value=0.0, step=0.10, format="%.2f",
-    help="z.B. 24.00 für Munich Re 2025. Leer lassen = automatisch aus yfinance."
+    help="z.B. 24.00 für Munich Re 2025. Leer lassen = automatisch."
 )
 
 st.sidebar.markdown("---")
 start = st.sidebar.button("Analyse starten", use_container_width=True)
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Watchlist**")
 for w in st.session_state.watchlist:
-    st.sidebar.markdown("- " + w)
-wl_neu = st.sidebar.text_input("Hinzufuegen", "")
-if st.sidebar.button("+ Hinzufuegen"):
-    if wl_neu and wl_neu.upper() not in st.session_state.watchlist:
-        st.session_state.watchlist.append(wl_neu.upper())
+    st.sidebar.markdown(f"- {w}")
+if st.sidebar.button("+ Aktuelle WKN merken") and wkn_input:
+    if wkn_input not in st.session_state.watchlist:
+        st.session_state.watchlist.append(wkn_input)
 
 # ── Analyse ───────────────────────────────────────────────────────────────────
 if start:
-    with st.spinner("Lade Daten..."):
-        df_raw, divs, meta = lade_daten(ticker, zeitraum)
+    if not wkn_input or len(wkn_input) < 4:
+        st.error("Bitte eine gültige WKN eingeben (z.B. 843002 für Munich Re).")
+        st.stop()
+
+    with st.spinner(f"Suche Ticker für WKN {wkn_input} ..."):
+        ticker, gefundener_name = wkn_zu_ticker(wkn_input)
+
+    if not ticker:
+        st.error(f"Kein Ticker für WKN **{wkn_input}** gefunden. Bitte WKN prüfen.")
+        st.stop()
+
+    st.info(f"WKN **{wkn_input}** → **{ticker}** ({gefundener_name})")
+
+    with st.spinner("Lade Marktdaten..."):
+        df_raw, divs, meta = lade_daten(ticker, "5y")
 
     if df_raw is None:
-        st.error("Keine Daten. Tipp: .DE fuer deutsche Aktien (z.B. BMW.DE)")
+        st.error(f"Keine Kursdaten für {ticker} verfügbar.")
         st.stop()
 
     with st.spinner("Berechne Indikatoren..."):
         df = indikatoren(df_raw.copy())
 
-    with st.spinner("Trainiere Modell..."):
+    with st.spinner("Trainiere KI-Modell..."):
         df_f, lag = features(df)
         prob, acc, imp, m, X = modell(df_f, lag)
 
     with st.spinner("Trefferquote..."):
         tq = trefferquote(m, X, df_f)
 
-    with st.spinner("Monte Carlo..."):
+    with st.spinner("Monte Carlo Simulation..."):
         preis  = float(df["Close"].iloc[-1])
         rsi    = float(df["RSI"].iloc[-1])
         sma20  = float(df["SMA20"].iloc[-1])
@@ -405,32 +431,29 @@ if start:
         rvmax = nakt * vpa
 
         dv = div_info(divs, preis, nakt, meta.get("div_yield", 0), manuell_div)
-        p6, mu, sigma = monte_carlo(df, 126, n_sim, div_pa=dv["yield"]/100)
-        p1, _,  _     = monte_carlo(df, 252, n_sim, div_pa=dv["yield"]/100)
+        p6, mu, sigma = monte_carlo(df, 126, 1000, div_pa=dv["yield"]/100)
+        p1, _,  _     = monte_carlo(df, 252, 1000, div_pa=dv["yield"]/100)
         k6 = kz(p6, preis)
         k1 = kz(p1, preis)
 
-    # Header
+    # ── Header ────────────────────────────────────────────────────────────────
     st.subheader(meta.get("name", ticker) + " (" + ticker + ")")
     st.caption("Sektor: " + meta.get("sector", "-"))
 
-    # Metriken
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Preis",        f"{preis:.2f}")
     c2.metric("RSI",          f"{rsi:.1f}")
     c3.metric("KI-Konfidenz", f"{konf*100:.0f}%")
     c4.metric("Accuracy",     f"{acc*100:.0f}%")
-    c5.metric("Div.-Rendite", f"{dv['yield']:.1f}%",
-              help=dv.get("quelle", ""))
+    c5.metric("Div.-Rendite", f"{dv['yield']:.1f}%", help=dv.get("quelle",""))
 
     if manuell_div > 0:
-        st.info(f"⚠️ Dividende manuell überschrieben: **{manuell_div:.2f} EUR/Aktie** "
-                f"({dv['yield']:.2f}% bei aktuellem Kurs). "
-                f"yfinance-Wert wurde ignoriert.")
+        st.info(f"⚠️ Dividende manuell: **{manuell_div:.2f} EUR/Aktie** "
+                f"({dv['yield']:.2f}% bei aktuellem Kurs). yfinance-Wert ignoriert.")
 
     st.markdown("---")
 
-    # Signal + Risiko
+    # ── Signal + Risiko ───────────────────────────────────────────────────────
     col_sig, col_ris = st.columns([3, 2])
     with col_sig:
         st.subheader(emoji + " Signal: " + sig)
@@ -451,108 +474,94 @@ if start:
     with col_ris:
         st.markdown("**Risiko-Plan**")
         r1c, r2c = st.columns(2)
-        r1c.metric("Aktien",      str(nakt) + " Stk")
-        r2c.metric("Investition", f"{inv:.0f} EUR")
-        r1c.metric("Stop-Loss",   f"{sl:.2f}")
-        r2c.metric("Max. Verlust",f"{rvmax:.0f} EUR")
+        r1c.metric("Aktien",       str(nakt) + " Stk")
+        r2c.metric("Investition",  f"{inv:.0f} EUR")
+        r1c.metric("Stop-Loss",    f"{sl:.2f}")
+        r2c.metric("Max. Verlust", f"{rvmax:.0f} EUR")
 
     st.markdown("---")
 
-    # Dividenden
+    # ── Dividenden ────────────────────────────────────────────────────────────
     if dv["yield"] > 0:
         st.subheader("💰 Dividenden")
         d1c, d2c, d3c, d4c = st.columns(4)
-        d1c.metric("Rendite p.a.", f"{dv['yield']:.1f}%")
-        d2c.metric("Pro Aktie",    f"{dv['pa']:.2f} EUR")
-        d3c.metric("Deine Div. 6M",f"{dv['g6']:.0f} EUR")
-        d4c.metric("Deine Div. 1J",f"{dv['g1']:.0f} EUR")
-        st.info(f"Rhythmus: {dv['iv']}  |  Naechste Zahlung ca. {dv['next']}  |  "
+        d1c.metric("Rendite p.a.",  f"{dv['yield']:.1f}%")
+        d2c.metric("Pro Aktie",     f"{dv['pa']:.2f} EUR")
+        d3c.metric("Deine Div. 6M", f"{dv['g6']:.0f} EUR")
+        d4c.metric("Deine Div. 1J", f"{dv['g1']:.0f} EUR")
+        st.info(f"Rhythmus: {dv['iv']}  |  Nächste Zahlung ca. {dv['next']}  |  "
                 f"6M: {dv['z6']}x  |  1J: {dv['z1']}x  |  Quelle: {dv.get('quelle','')}")
 
     st.markdown("---")
 
-    # Prognose
+    # ── Prognose ──────────────────────────────────────────────────────────────
     st.subheader("🔭 Langfrist-Prognose")
     st.caption(f"Drift: {mu*252*100:.1f}% p.a.  |  Vola: {sigma*252**0.5*100:.1f}% p.a.")
-    pr1, pr2 = st.columns(2)
 
     g6tot = round(k6["ret"] + dv["r6"], 1)
     g1tot = round(k1["ret"] + dv["r1"], 1)
     gwkt6 = round(k6["gwkt"] * 100)
     gwkt1 = round(k1["gwkt"] * 100)
 
-    if "6 Monate" in horizont:
-        with pr1:
-            st.markdown("#### In 6 Monaten — kaufst du heute")
-            g6col = "normal" if g6tot >= 0 else "inverse"
-            m1c, m2c, m3c = st.columns(3)
-            m1c.metric("Erwarteter Kurs", f"{k6['p50']:.2f}",
-                       f"{k6['ret']:+.1f}% Kursgewinn",
-                       help="Median aus Szenarien — in 50% der Faelle liegt er hoeher")
-            m2c.metric("Guenstiges Szenario", f"{k6['p75']:.2f}",
-                       f"{(k6['p75']-preis)/preis*100:+.1f}%")
-            m3c.metric("Schlechtes Szenario", f"{k6['p25']:.2f}",
-                       f"{(k6['p25']-preis)/preis*100:+.1f}%")
-            st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g6tot}%",
-                      delta_color=g6col)
-            st.metric(
-                label=f"In {gwkt6}% der Szenarien machst du Gewinn",
-                value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
-                delta=f"Maximal {rvmax:.0f} EUR Verlust",
-                delta_color="inverse"
-            )
-            st.caption(f"Extremfall ohne Stop-Loss: unten {k6['p5']:.0f} "
-                       f"({(k6['p5']-preis)/preis*100:+.0f}%) | "
-                       f"oben {k6['p95']:.0f} ({(k6['p95']-preis)/preis*100:+.0f}%)")
+    pr1, pr2 = st.columns(2)
+    with pr1:
+        st.markdown("#### In 6 Monaten — kaufst du heute")
+        g6col = "normal" if g6tot >= 0 else "inverse"
+        m1c, m2c, m3c = st.columns(3)
+        m1c.metric("Erwarteter Kurs", f"{k6['p50']:.2f}",
+                   f"{k6['ret']:+.1f}% Kursgewinn",
+                   help="Median — in 50% der Szenarien liegt er höher")
+        m2c.metric("Günstiges Szenario", f"{k6['p75']:.2f}",
+                   f"{(k6['p75']-preis)/preis*100:+.1f}%")
+        m3c.metric("Schlechtes Szenario", f"{k6['p25']:.2f}",
+                   f"{(k6['p25']-preis)/preis*100:+.1f}%")
+        st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g6tot}%", delta_color=g6col)
+        st.metric(
+            label=f"In {gwkt6}% der Szenarien machst du Gewinn",
+            value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
+            delta=f"Maximal {rvmax:.0f} EUR Verlust", delta_color="inverse"
+        )
+        st.caption(f"Extremfall ohne Stop-Loss: unten {k6['p5']:.0f} "
+                   f"({(k6['p5']-preis)/preis*100:+.0f}%) | "
+                   f"oben {k6['p95']:.0f} ({(k6['p95']-preis)/preis*100:+.0f}%)")
 
-    if "1 Jahr" in horizont:
-        with pr2:
-            st.markdown("#### In 1 Jahr — kaufst du heute")
-            g1col = "normal" if g1tot >= 0 else "inverse"
-            m1c, m2c, m3c = st.columns(3)
-            m1c.metric("Erwarteter Kurs", f"{k1['p50']:.2f}",
-                       f"{k1['ret']:+.1f}% Kursgewinn")
-            m2c.metric("Guenstiges Szenario", f"{k1['p75']:.2f}",
-                       f"{(k1['p75']-preis)/preis*100:+.1f}%")
-            m3c.metric("Schlechtes Szenario", f"{k1['p25']:.2f}",
-                       f"{(k1['p25']-preis)/preis*100:+.1f}%")
-            st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g1tot}%",
-                      delta_color=g1col)
-            st.metric(
-                label=f"In {gwkt1}% der Szenarien machst du Gewinn",
-                value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
-                delta=f"Maximal {rvmax:.0f} EUR Verlust",
-                delta_color="inverse"
-            )
-            st.caption(f"Extremfall ohne Stop-Loss: unten {k1['p5']:.0f} "
-                       f"({(k1['p5']-preis)/preis*100:+.0f}%) | "
-                       f"oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
+    with pr2:
+        st.markdown("#### In 1 Jahr — kaufst du heute")
+        g1col = "normal" if g1tot >= 0 else "inverse"
+        m1c, m2c, m3c = st.columns(3)
+        m1c.metric("Erwarteter Kurs", f"{k1['p50']:.2f}",
+                   f"{k1['ret']:+.1f}% Kursgewinn")
+        m2c.metric("Günstiges Szenario", f"{k1['p75']:.2f}",
+                   f"{(k1['p75']-preis)/preis*100:+.1f}%")
+        m3c.metric("Schlechtes Szenario", f"{k1['p25']:.2f}",
+                   f"{(k1['p25']-preis)/preis*100:+.1f}%")
+        st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g1tot}%", delta_color=g1col)
+        st.metric(
+            label=f"In {gwkt1}% der Szenarien machst du Gewinn",
+            value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
+            delta=f"Maximal {rvmax:.0f} EUR Verlust", delta_color="inverse"
+        )
+        st.caption(f"Extremfall ohne Stop-Loss: unten {k1['p5']:.0f} "
+                   f"({(k1['p5']-preis)/preis*100:+.0f}%) | "
+                   f"oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
 
     st.plotly_chart(chart_prognose(df, p6, p1, preis, ticker), use_container_width=True)
 
-    # ── GESAMTFAZIT ───────────────────────────────────────────────────────────
+    # ── Gesamtfazit ───────────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("📝 Gesamtfazit")
-    fazit_text = gesamtfazit(
-        name=meta.get("name", ticker),
-        ticker=ticker,
-        preis=preis,
-        inv=inv,
-        nakt=nakt,
-        gwkt6=gwkt6,
-        gwkt1=gwkt1,
-        g6tot=g6tot,
-        g1tot=g1tot,
-        sl=sl,
-        rp=rp,
-        rvmax=rvmax,
-        k6=k6,
-        k1=k1,
-        sig=sig,
-    )
-    st.markdown(fazit_text)
+    st.markdown(gesamtfazit(
+        name=meta.get("name", ticker), ticker=ticker,
+        preis=preis, inv=inv, nakt=nakt,
+        gwkt6=gwkt6, gwkt1=gwkt1,
+        g6tot=g6tot, g1tot=g1tot,
+        sl=sl, rp=rp, rvmax=rvmax,
+        k6=k6, k1=k1, sig=sig,
+    ))
 
     st.markdown("---")
+
+    # ── Technische Analyse ────────────────────────────────────────────────────
     st.subheader("📊 Technische Analyse")
     st.plotly_chart(chart_tech(df, ticker), use_container_width=True)
 
