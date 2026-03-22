@@ -361,18 +361,17 @@ def garch(df, tage, n=1000, seed=42, div_pa=0):
 def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
     """Erstellt einen Vergleichs-Chart aller drei Simulationsmethoden."""
     methods = [
-        ("Monte Carlo", mc_paths, "#4a9eff"),
-        ("Bootstrap",   bs_paths, "#f0a000"),
-        ("GARCH(1,1)",  gc_paths, "#00c87a"),
+        ("Monte Carlo", mc_paths, "#4a9eff", "rgba(74,158,255,0.12)"),
+        ("Bootstrap",   bs_paths, "#f0a000", "rgba(240,160,0,0.12)"),
+        ("GARCH(1,1)",  gc_paths, "#00c87a", "rgba(0,200,122,0.12)"),
     ]
     fig = go.Figure()
-    for name, paths, color in methods:
+    for name, paths, color, fill_color in methods:
         ep = paths[:, -1]
         gwkt = float(np.mean(ep > kauf)) * 100
         med  = float(np.percentile(ep, 50))
         ret  = (med - kauf) / kauf * 100
         label = f"{name}: {gwkt:.0f}% Gewinn | Median {ret:+.1f}%"
-        # Kerze: p5–p95 Band + Median-Linie
         x_days = list(range(paths.shape[1]))
         p5  = list(np.percentile(paths, 5,  axis=0))
         p95 = list(np.percentile(paths, 95, axis=0))
@@ -383,9 +382,7 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
         fig.add_trace(go.Scatter(
             x=x_days, y=p5, name=label,
             line=dict(color="rgba(0,0,0,0)", width=0),
-            fill="tonexty",
-            fillcolor=color.replace(")", ",0.12)").replace("rgb", "rgba") if "rgb" in color
-                       else color + "1f"))
+            fill="tonexty", fillcolor=fill_color))
         fig.add_trace(go.Scatter(
             x=x_days, y=p50, name=label + " (Median)",
             line=dict(color=color, width=2, dash="dot")))
