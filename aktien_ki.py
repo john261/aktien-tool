@@ -328,11 +328,6 @@ def kz(paths, kauf):
 
 # ── GOLDEN CROSS BERECHNUNG ──────────────────────────────────────────────────
 def golden_cross_prognose(df):
-    """
-    Berechnet bei welchem konstanten Kursniveau ein Golden Cross
-    (SMA20 > SMA50) rechnerisch eintreten würde.
-    Dies ist eine Wenn-dann-Bedingung, keine Kursprognose.
-    """
     closes = df["Close"].values
     sma20_last = float(df["SMA20"].iloc[-1])
     sma50_last = float(df["SMA50"].iloc[-1])
@@ -430,19 +425,67 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
     return fig
 
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
-def signal(prob, rsi, sma20, sma50, macd_h):
+# ▶▶ GEÄNDERT: sma200 als neuer Parameter für kontextabhängige RSI-Bewertung
+def signal(prob, rsi, sma20, sma50, macd_h, sma200=None):
     g, s = [], 0.0
+
+    # ML-Konfidenz (Gewicht: ±0.50)
     s += (prob - 0.5) * 2 * 0.5
     g.append(f"ML: {prob*100:.1f}%")
-    if rsi < 30:   s += 0.25; g.append(f"RSI {rsi:.0f} - ueberverkauft")
-    elif rsi > 70: s -= 0.25; g.append(f"RSI {rsi:.0f} - ueberkauft")
-    elif rsi < 45: s -= 0.10; g.append(f"RSI {rsi:.0f} - leicht baerisch")
-    elif rsi > 55: s += 0.10; g.append(f"RSI {rsi:.0f} - leicht bullisch")
-    else:          g.append(f"RSI {rsi:.0f} - neutral")
-    if sma20 > sma50: s += 0.15; g.append("SMA20 > SMA50 - Aufwaertstrend")
-    else:             s -= 0.15; g.append("SMA20 < SMA50 - Abwaertstrend")
-    if macd_h > 0: s += 0.10; g.append("MACD positiv")
-    else:          s -= 0.10; g.append("MACD negativ")
+
+    # ── RSI — kontextabhängig ────────────────────────────────────────────────
+    # Massiv überverkauft: immer positiv
+    if rsi < 30:
+        s += 0.25
+        g.append(f"RSI {rsi:.0f} - massiv ueberverkauft")
+
+    # Leicht gedrückt (30–45): Bedeutung hängt vom Langfristtrend ab
+    elif rsi < 45:
+        if sma200 is not None and sma50 > sma200:
+            # Pullback im intakten Aufwärtstrend → klassisches Kaufsignal
+            s += 0.10
+            g.append(f"RSI {rsi:.0f} - Pullback im Aufwaertstrend (bullisch)")
+        else:
+            # Schwaches Momentum im Abwärtstrend → negativ
+            s -= 0.10
+            g.append(f"RSI {rsi:.0f} - schwaches Momentum im Abwaertstrend")
+
+    # Überkauft: immer negativ
+    elif rsi > 70:
+        s -= 0.25
+        g.append(f"RSI {rsi:.0f} - ueberkauft")
+
+    # Leicht erhitzt (55–70): kontextabhängig
+    elif rsi > 55:
+        if sma200 is not None and sma50 < sma200:
+            # Erholt sich im Abwärtstrend → Vorsicht, könnte Erholung sein
+            s += 0.05
+            g.append(f"RSI {rsi:.0f} - leicht bullisch (Erholung)")
+        else:
+            s += 0.10
+            g.append(f"RSI {rsi:.0f} - leicht bullisch")
+
+    # Neutralzone (45–55): kein Signal
+    else:
+        g.append(f"RSI {rsi:.0f} - neutral")
+
+    # SMA20 vs SMA50
+    if sma20 > sma50:
+        s += 0.15
+        g.append("SMA20 > SMA50 - Aufwaertstrend")
+    else:
+        s -= 0.15
+        g.append("SMA20 < SMA50 - Abwaertstrend")
+
+    # MACD
+    if macd_h > 0:
+        s += 0.10
+        g.append("MACD positiv")
+    else:
+        s -= 0.10
+        g.append("MACD negativ")
+
+    # Timing-Ampel
     if s > 0.20:
         timing = "Günstiger Einstiegszeitpunkt"
         timing_ico = "🟢"
@@ -458,6 +501,7 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     else:
         timing = "Ungünstiger Einstiegszeitpunkt"
         timing_ico = "🔴"
+
     return timing, timing_ico, min(abs(s)/0.55, 1.0), g, s
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
@@ -488,8 +532,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     else:
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis verdient besondere Aufmerksamkeit — mehr als ein Drittel der Szenarien endet im Minus."
 
-    # ── FIX: Dynamische Verben je nach tatsächlicher Richtung ────────────────
-    # Gewinnwahrscheinlichkeit: steigt, fällt oder bleibt gleich von 6M → 1J?
     if gwkt1 > gwkt6:
         wkt_verb = "steigt die Gewinnwahrscheinlichkeit auf"
     elif gwkt1 < gwkt6:
@@ -497,7 +539,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     else:
         wkt_verb = "bleibt die Gewinnwahrscheinlichkeit stabil bei"
 
-    # Gesamtertrag: verbessert, verschlechtert oder gleich von 6M → 1J?
     if g1tot > g6tot:
         ertrag_verb = "verbessert sich der erwartete Gesamtertrag auf"
     elif g1tot < g6tot:
@@ -534,11 +575,20 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"stark ausverkauft. Das bedeutet nicht automatisch eine Trendwende, kann aber ein "
                 f"Einstiegssignal sein — besonders wenn gleichzeitig die Fundamentaldaten stimmen."
             )
-        elif rsi < 40:
-            tech_lines.append(
-                f"**RSI {rsi:.1f} — überverkauft.** Die Aktie zeigt Schwäche, ist aber noch nicht im "
-                f"extremen Ausverkaufsbereich."
-            )
+        elif rsi < 45:
+            if sma200 is not None and sma50 > sma200:
+                tech_lines.append(
+                    f"**RSI {rsi:.1f} — Pullback im intakten Aufwärtstrend.** "
+                    f"Diese Kombination gilt empirisch als eines der zuverlässigsten Einstiegsmuster: "
+                    f"der langfristige Trend zeigt aufwärts, der RSI hat sich abgekühlt — "
+                    f"klassisches Pullback-Kaufsignal."
+                )
+            else:
+                tech_lines.append(
+                    f"**RSI {rsi:.1f} — schwaches Momentum im Abwärtstrend.** "
+                    f"Der RSI ist gedrückt und der langfristige Trend zeigt abwärts — "
+                    f"kein attraktiver Einstieg, da weiterer Druck möglich ist."
+                )
         elif rsi > 70:
             tech_lines.append(
                 f"**RSI {rsi:.1f} — überkauft.** Die Aktie ist kurzfristig heiß gelaufen. "
@@ -564,12 +614,14 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
 
     # ── Gesamtbild Checkliste ────────────────────────────────────────────────
     gesamtbild_lines = []
+
     if gwkt1 >= 75:
         gesamtbild_lines.append(f"✅ **Simulation:** {gwkt1} % Gewinnwahrscheinlichkeit auf Jahressicht — stark")
     elif gwkt1 >= 60:
         gesamtbild_lines.append(f"🟡 **Simulation:** {gwkt1} % Gewinnwahrscheinlichkeit — solide")
     else:
         gesamtbild_lines.append(f"🔴 **Simulation:** nur {gwkt1} % Gewinnwahrscheinlichkeit — schwach")
+
     if ana and ana.get("ziel") and preis > 0:
         upside_ana = (ana["ziel"] - preis) / preis * 100
         if upside_ana >= 15:
@@ -580,6 +632,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟡 **Analysten:** Kurs fast am Kursziel ({ana['ziel']:.0f} EUR) — kaum Spielraum")
         else:
             gesamtbild_lines.append(f"🔴 **Analysten:** Kurs über Kursziel — Analysten sehen Rückgang")
+
     if dv and dv.get("yield", 0) > 0:
         yld = dv["yield"]
         if yld >= 3:
@@ -588,17 +641,29 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟡 **Dividende:** {yld:.1f} % — moderate Ausschüttung")
     else:
         gesamtbild_lines.append(f"⚪ **Dividende:** keine Ausschüttung")
+
+    # ▶▶ GEÄNDERT: RSI im Gesamtbild kontextabhängig bewerten
     if rsi is not None:
         if rsi < 30:
             gesamtbild_lines.append(f"✅ **RSI {rsi:.1f}** — massiv überverkauft, mögliches Einstiegsfenster")
         elif rsi < 45:
-            gesamtbild_lines.append(f"✅ **RSI {rsi:.1f}** — leicht gedrückt, kein überhitzter Einstieg")
+            if sma200 is not None and sma50 is not None and sma50 > sma200:
+                # Pullback im Aufwärtstrend → positives Signal
+                gesamtbild_lines.append(
+                    f"✅ **RSI {rsi:.1f}** — Pullback im intakten Aufwärtstrend, attraktives Einstiegsfenster"
+                )
+            else:
+                # Schwaches Momentum im Abwärtstrend → neutral bis negativ
+                gesamtbild_lines.append(
+                    f"🟡 **RSI {rsi:.1f}** — gedrücktes Momentum, Trendkontext beachten"
+                )
         elif rsi <= 60:
             gesamtbild_lines.append(f"🟡 **RSI {rsi:.1f}** — neutral, kein Warnsignal")
         elif rsi <= 70:
             gesamtbild_lines.append(f"🟡 **RSI {rsi:.1f}** — leicht erhitzt, Vorsicht bei Einstieg")
         else:
             gesamtbild_lines.append(f"🔴 **RSI {rsi:.1f}** — überkauft, schlechter Einstiegszeitpunkt")
+
     if score is not None:
         if score > 0.20:
             gesamtbild_lines.append(f"✅ **Timing:** Günstiger Einstiegszeitpunkt — jetzt technisch sauber")
@@ -610,6 +675,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟠 **Timing:** Eher ungünstiger Moment — kurzfristig etwas Gegenwind")
         else:
             gesamtbild_lines.append(f"🔴 **Timing:** Ungünstiger Einstiegszeitpunkt — kurzfristig schwach")
+
     if sma20 is not None and sma50 is not None and sma200 is not None:
         if sma20 > sma50 and sma50 > sma200:
             gesamtbild_lines.append(f"✅ **Trend:** kurz- und langfristig aufwärts — starke Trendstruktur")
@@ -660,6 +726,17 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"(SMA50 unter SMA200). Das bedeutet strukturelle Schwäche — ein tiefer RSI "
                 f"allein reicht nicht als Kaufsignal. Erst wenn SMA50 wieder über SMA200 "
                 f"steigt, verbessert sich das Chance-Risiko-Verhältnis deutlich."
+            )
+        elif rsi < 45 and sma200 is not None and sma50 > sma200 and gwkt1 >= 65:
+            # ▶▶ NEU: Pullback-Strategie für RSI 30–45 im Aufwärtstrend
+            empfehlung_block = (
+                f"\n\n**💡 Einstiegsempfehlung — Pullback-Einstieg:**\n\n"
+                f"RSI {rsi:.1f} signalisiert einen Rücksetzer im intakten Aufwärtstrend — "
+                f"eine der verlässlichsten Einstiegskonstellationen. Der langfristige Trend (SMA200) "
+                f"stützt die Aktie strukturell.\n\n"
+                f"— **Jetzt einsteigen:** Vollständige oder große Position ist vertretbar\n\n"
+                f"— **Stop-Loss konsequent bei {sl:.2f} EUR setzen** — begrenzt das Risiko klar\n\n"
+                f"— **Gewinnziel:** Rückkehr zum SMA50 ({sma50:.2f} EUR) als erste Orientierung"
             )
         elif sma20 > sma50 and sma200 is not None and sma50 > sma200 and gwkt1 >= 70 and rsi < 65:
             empfehlung_block = (
@@ -908,8 +985,10 @@ if start:
         macd_h = float(df["MACD_H"].iloc[-1])
         bb_u   = float(df["BB_U"].iloc[-1])
         bb_l   = float(df["BB_L"].iloc[-1])
+        sma200_val = float(df["SMA200"].iloc[-1]) if "SMA200" in df.columns else None
 
-        timing, timing_ico, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h)
+        # ▶▶ GEÄNDERT: sma200_val wird jetzt an signal() übergeben
+        timing, timing_ico, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h, sma200=sma200_val)
 
         sl    = preis * (1 - rp / 100)
         vpa   = preis - sl
@@ -944,7 +1023,6 @@ if start:
     regime_map  = {3: "🟢 Bulle / ruhig", 2: "🟡 Bulle / volatil",
                    1: "🟠 Bär / ruhig",   0: "🔴 Bär / volatil"}
     regime_txt  = regime_map.get(regime_val, "–")
-    sma200_val  = float(df["SMA200"].iloc[-1]) if "SMA200" in df.columns else None
 
     c1.metric("Preis",        f"{preis:.2f}")
     c2.metric("RSI",          f"{rsi:.1f}")
@@ -979,8 +1057,8 @@ if start:
         st.caption(f"Technische Stärke: {konf*100:.0f}%  |  ML-Kurzfrist: {prob*100:.0f}%")
         st.markdown("**Technische Indikatoren (kurzfristig):**")
         for g in gruende:
-            bull = any(k in g for k in ["ueberverkauft","bullisch","Aufwaerts","positiv"])
-            bear = any(k in g for k in ["ueberkauft","baerisch","Abwaerts","negativ"])
+            bull = any(k in g for k in ["ueberverkauft","bullisch","Aufwaerts","positiv","Pullback"])
+            bear = any(k in g for k in ["ueberkauft","Abwaerts","negativ","schwaches Momentum"])
             ico  = "🟢" if bull else ("🔴" if bear else "🟡")
             st.markdown(ico + " " + g)
 
@@ -1137,7 +1215,6 @@ if start:
     # ── Gesamtfazit ───────────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("📝 Gesamtfazit")
-    sma200_fazit = float(df["SMA200"].iloc[-1]) if "SMA200" in df.columns else None
     st.markdown(gesamtfazit(
         name=meta.get("name", ticker), ticker=ticker,
         preis=preis, inv=inv, nakt=nakt,
@@ -1145,7 +1222,7 @@ if start:
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
         k6=k6, k1=k1, sig=timing, ana=ana, gc_info=gc_info,
-        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h, dv=dv, score=score,
+        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_val, macd_h=macd_h, dv=dv, score=score,
     ))
 
     st.markdown("---")
