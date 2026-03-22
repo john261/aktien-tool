@@ -1276,7 +1276,7 @@ if start:
         with e1:
             sp = int((score + 0.55) / 1.10 * 100)
             sp = max(0, min(100, sp))
-            st.markdown(f"**Score:** {score:+.2f}  |  {sig}")
+            st.markdown(f"**Score:** {score:+.2f}  |  {timing}")
             st.progress(sp / 100)
             st.caption(f"Bollinger: Oben {bb_u:.2f}  Unten {bb_l:.2f}")
         with e2:
