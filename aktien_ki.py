@@ -375,7 +375,9 @@ def kz(paths, kauf):
 def golden_cross_prognose(df):
     """
     Berechnet ab welchem Kursniveau und in ca. wie vielen Tagen
-    ein Golden Cross (SMA20 > SMA50) eintreten würde.
+    ein Golden Cross (SMA20 > SMA50) eintreten würde,
+    FALLS der Kurs auf dem berechneten Niveau konstant bleibt.
+    Dies ist eine Wenn-dann-Bedingung, keine Kursprognose.
     """
     closes = df["Close"].values
     sma20_last = float(df["SMA20"].iloc[-1])
@@ -502,44 +504,25 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
 def signal(prob, rsi, sma20, sma50, macd_h):
     """
-    Timing-Signal: Bewertet NUR ob der aktuelle Moment technisch günstig ist.
-    Gewichtung: Trend (SMA) ist wichtigster Faktor, RSI zeigt Einstiegszeitpunkt,
-    MACD und ML sind ergänzende Signale mit geringerer Gewichtung.
+    Timing-Signal: Bewertet NUR ob der aktuelle Moment technisch günstig ist
+    für einen Einstieg — nicht ob die Aktie langfristig gut ist.
+    Das ist Aufgabe der Simulation.
     """
     g, s = [], 0.0
-
-    # Trend ist der stärkste Faktor (0.30) — Aufwärtstrend = guter Einstieg
-    if sma20 > sma50:
-        s += 0.30; g.append("SMA20 > SMA50 - Aufwaertstrend")
-    else:
-        s -= 0.30; g.append("SMA20 < SMA50 - Abwaertstrend")
-
-    # RSI: Überverkauft = günstig, Überkauft = ungünstig (0.25)
-    if rsi < 30:
-        s += 0.30; g.append(f"RSI {rsi:.0f} - stark ueberverkauft (Einstiegschance)")
-    elif rsi < 40:
-        s += 0.15; g.append(f"RSI {rsi:.0f} - ueberverkauft")
-    elif rsi < 50:
-        s += 0.05; g.append(f"RSI {rsi:.0f} - leicht gedrückt")
-    elif rsi < 60:
-        g.append(f"RSI {rsi:.0f} - neutral")
-    elif rsi < 70:
-        s -= 0.10; g.append(f"RSI {rsi:.0f} - leicht erhoben")
-    else:
-        s -= 0.25; g.append(f"RSI {rsi:.0f} - ueberkauft")
-
-    # MACD: ergänzendes Signal (0.10)
-    if macd_h > 0:
-        s += 0.10; g.append("MACD positiv")
-    else:
-        s -= 0.10; g.append("MACD negativ")
-
-    # ML: kurzfristiges Zusatzsignal (0.10) — weniger Gewicht als Trend
-    s += (prob - 0.5) * 0.20
+    s += (prob - 0.5) * 2 * 0.5
     g.append(f"ML: {prob*100:.1f}%")
+    if rsi < 30:   s += 0.25; g.append(f"RSI {rsi:.0f} - ueberverkauft")
+    elif rsi > 70: s -= 0.25; g.append(f"RSI {rsi:.0f} - ueberkauft")
+    elif rsi < 45: s -= 0.10; g.append(f"RSI {rsi:.0f} - leicht baerisch")
+    elif rsi > 55: s += 0.10; g.append(f"RSI {rsi:.0f} - leicht bullisch")
+    else:          g.append(f"RSI {rsi:.0f} - neutral")
+    if sma20 > sma50: s += 0.15; g.append("SMA20 > SMA50 - Aufwaertstrend")
+    else:             s -= 0.15; g.append("SMA20 < SMA50 - Abwaertstrend")
+    if macd_h > 0: s += 0.10; g.append("MACD positiv")
+    else:          s -= 0.10; g.append("MACD negativ")
 
-    # Timing-Label
-    if s > 0.25:
+    # Timing-Label statt KAUFEN/VERKAUFEN
+    if s > 0.20:
         timing = "Günstiger Einstiegszeitpunkt"
         timing_ico = "🟢"
     elif s > 0.05:
@@ -548,14 +531,14 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     elif s > -0.05:
         timing = "Neutraler Moment"
         timing_ico = "🟡"
-    elif s > -0.25:
+    elif s > -0.20:
         timing = "Eher ungünstiger Moment"
         timing_ico = "🟠"
     else:
         timing = "Ungünstiger Einstiegszeitpunkt"
         timing_ico = "🔴"
 
-    return timing, timing_ico, min(abs(s)/0.65, 1.0), g, s
+    return timing, timing_ico, min(abs(s)/0.55, 1.0), g, s
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
@@ -828,10 +811,13 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             if upside > sim_ret:
                 # Analysten bullisher als Simulation
                 if gwkt1 < 55:
+                    # FIX: Golden-Cross-Text als klare Wenn-dann-Bedingung formuliert,
+                    # nicht als Kursprognose. Das Tool berechnet nur, bei welchem
+                    # konstanten Kursniveau ein Golden Cross rechnerisch eintreten würde.
                     trendwende = (
                         f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
                         f"Die {ana.get('n', '')} befragten Analysten sehen ein durchschnittliches Kursziel "
-                        f"von **{ziel:.0f} EUR (+{upside:.0f} %)** und empfehlen **{empf_txt}** — "
+                        f"von **{ziel:.0f} EUR ({upside:+.0f} %)** und empfehlen **{empf_txt}** — "
                         f"die Simulation hingegen zeigt nur **{sim_ret:+.1f} %** Gesamtertrag bei "
                         f"lediglich **{gwkt1} % Gewinnwahrscheinlichkeit**. "
                         f"Diese Diskrepanz von **{differenz:.0f} Prozentpunkten** entsteht oft, wenn "
@@ -839,10 +825,10 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                         f"Ein technischer Trendwechsel — SMA20 über SMA50 — wäre das erste Signal, "
                         f"dass sich Kurs und Analystenmeinung annähern. Bis dahin ist Abwarten ratsam. "
                         + (
-                            f"Laut aktueller SMA-Berechnung würde ein Golden Cross bei einem "
-                            f"nachhaltigen Kurs von ca. **{gc_info['kurs']:.2f} EUR** "
-                            f"in etwa **{gc_info['tage']} Handelstagen** eintreten — "
-                            f"das wäre das konkrete Einstiegssignal."
+                            f"**Hinweis zur Golden-Cross-Berechnung:** Dies ist keine Kursprognose, "
+                            f"sondern eine Wenn-dann-Bedingung: Falls der Kurs bei ca. **{gc_info['kurs']:.2f} EUR** "
+                            f"bleibt, würde ein Golden Cross rechnerisch nach etwa **{gc_info['tage']} Handelstagen** eintreten. "
+                            f"Ob und wann dieser Kurs tatsächlich erreicht wird, ist unbekannt."
                             if gc_info else ""
                         )
                     )
@@ -865,17 +851,19 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 )
             analyst_block = trendwende
 
+    # FIX: Vorzeichen bei g6tot und g1tot korrekt ausgeben — war vorher hardcoded "+",
+    # was bei negativen Werten zu "+-X%" führte. Jetzt wird das Vorzeichen dynamisch gesetzt.
     return f"""
 **Gesamtfazit – {name} ({ticker})**
 
 Wer heute **{nakt} Aktien** zu je **{preis:.2f} EUR** kauft — also **{inv:,.0f} EUR** investiert — \
 hält laut Monte-Carlo-Simulation in **{gwkt6} % aller Szenarien** nach sechs Monaten mehr als heute. \
-Der erwartete Gesamtertrag (Kurs + Dividende) liegt bei **+{g6tot} %**. \
+Der erwartete Gesamtertrag (Kurs + Dividende) liegt bei **{g6tot:+.1f} %**. \
 Im günstigen Fall wächst das Investment um **+{xup6_pct} %**, im schlechten Szenario \
 liegt der Extremverlust ohne Absicherung bei **–{xdown6_pct} %**.
 
 Hältst du ein volles Jahr durch, steigt die Gewinnwahrscheinlichkeit weiter auf **{gwkt1} %**. \
-Der erwartete Gesamtertrag klettert auf **+{g1tot} %**. \
+Der erwartete Gesamtertrag klettert auf **{g1tot:+.1f} %**. \
 Selbst im ungünstigsten Extremfall ohne Stop-Loss wären maximal **–{xdown1_pct} %** \
 möglich — nach oben hingegen bis zu **+{xup1_pct} %**.
 
@@ -1030,7 +1018,6 @@ if start:
         bb_l   = float(df["BB_L"].iloc[-1])
 
         timing, timing_ico, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h)
-        # timing_ico kommt direkt aus signal()
 
         sl    = preis * (1 - rp / 100)
         vpa   = preis - sl
@@ -1196,7 +1183,8 @@ if start:
                    f"{(k6['p75']-preis)/preis*100:+.1f}%")
         m3c.metric("Schlechtes Szenario", f"{k6['p25']:.2f}",
                    f"{(k6['p25']-preis)/preis*100:+.1f}%")
-        st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g6tot}%", delta_color=g6col)
+        # FIX: Vorzeichen dynamisch — kein hardcoded "+"
+        st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"{g6tot:+.1f}%", delta_color=g6col)
         st.metric(
             label=f"In {gwkt6}% der Szenarien machst du Gewinn",
             value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
@@ -1216,7 +1204,8 @@ if start:
                    f"{(k1['p75']-preis)/preis*100:+.1f}%")
         m3c.metric("Schlechtes Szenario", f"{k1['p25']:.2f}",
                    f"{(k1['p25']-preis)/preis*100:+.1f}%")
-        st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"+{g1tot}%", delta_color=g1col)
+        # FIX: Vorzeichen dynamisch — kein hardcoded "+"
+        st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"{g1tot:+.1f}%", delta_color=g1col)
         st.metric(
             label=f"In {gwkt1}% der Szenarien machst du Gewinn",
             value=f"Stop-Loss bei {sl:.2f} EUR  (-{rp}%)",
@@ -1250,7 +1239,8 @@ if start:
                     gwkt_val = round(k["gwkt"]*100)
                     ret_val  = round(k["ret"] + dv["r6" if horizon_label=="6 Monate" else "r1"], 1)
                     col.metric("Gewinn-Wkt.", f"{gwkt_val} %")
-                    col.metric("Erw. Ertrag", f"+{ret_val} %",
+                    # FIX: Vorzeichen dynamisch — kein hardcoded "+"
+                    col.metric("Erw. Ertrag", f"{ret_val:+.1f} %",
                                delta_color="normal" if ret_val >= 0 else "inverse")
                     col.metric("Median-Kurs", f"{k['p50']:.2f} EUR")
                     col.metric("Worst Case",  f"{k['p5']:.0f} EUR",
