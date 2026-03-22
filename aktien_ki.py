@@ -184,16 +184,24 @@ def indikatoren(df):
     df["R1"] = c.pct_change(1)
     df["R5"] = c.pct_change(5)
     df["R10"] = c.pct_change(10)
-    # Verbessertes Target: 5-Tage-Rendite > +1% statt Next-Day-Direction
-    # Reduziert Noise erheblich und lernt echte Trends
-    df["Target"] = np.where(c.shift(-5) / c - 1 > 0.01, 1, 0)
-    # Neue Feature-Engineering Features
-    df["Vola_Change"]   = df["ATR"] / (df["ATR"].rolling(20).mean() + 1e-9)
-    df["Trend_Strength"]= df["SMA20"] / (df["SMA50"] + 1e-9)
-    df["Mom_Accel"]     = df["R1"] - df["R5"]
+    # Verbessertes Target: 5-Tage-Rendite > +2% (weniger Noise als 1%)
+    df["Target"] = np.where(c.shift(-5) / c - 1 > 0.02, 1, 0)
+    # Feature Engineering
+    df["Vola_Change"]    = df["ATR"] / (df["ATR"].rolling(20).mean() + 1e-9)
+    df["Trend_Strength"] = df["SMA20"] / (df["SMA50"] + 1e-9)
+    df["Mom_Accel"]      = df["R1"] - df["R5"]
+    # ── Marktregime-Features ──────────────────────────────────────────────────
+    # SMA200 für langfristigen Trendregime (Bullenmarkt vs. Bärenmarkt)
+    df["SMA200"]         = c.rolling(200).mean()
+    df["Regime_Trend"]   = (df["SMA50"] > df["SMA200"]).astype(int)
+    # Volatilitätsregime: ATR über 50-Tage-Schnitt = hohes Risiko-Regime
+    df["Regime_Vola"]    = (df["ATR"] > df["ATR"].rolling(50).mean()).astype(int)
+    # Kombiniertes Regime: 0=Bär+hoheVola, 1=Bär+niedrigeVola,
+    #                       2=Bulle+hoheVola, 3=Bulle+niedrigeVola (optimal)
+    df["Regime"]         = df["Regime_Trend"] * 2 + (1 - df["Regime_Vola"])
     return df.dropna()
 
-FCOLS = ["RSI","MACD_H","BB_P","BB_W","VR","R1","R5","R10","TR","Vola_Change","Trend_Strength","Mom_Accel"]
+FCOLS = ["RSI","MACD_H","BB_P","BB_W","VR","R1","R5","R10","TR","Vola_Change","Trend_Strength","Mom_Accel","Regime_Trend","Regime_Vola","Regime"]
 
 def features(df):
     df = df.copy()
@@ -206,23 +214,32 @@ def features(df):
 # ── MODELL ────────────────────────────────────────────────────────────────────
 def modell(df, lag):
     """
-    Walk-Forward Validation statt einfachem 80/20-Split.
-    Trainiert auf rollendem Fenster und testet immer auf echten Out-of-Sample-Daten.
-    Gibt realistischere Accuracy und verhindert Overfitting.
+    Walk-Forward Validation mit Rolling Window (nur letzte 2 Jahre relevant).
+    Sigmoid-Kalibrierung statt Isotonic — stabiler bei begrenzten Daten.
+    Marktregime fliesst als Feature ein.
     """
     X, y = df[lag], df["Target"]
     n = len(X)
 
-    # Walk-Forward: mind. 200 Trainings-Samples, Schritte von 20 Tagen
-    min_train = min(200, int(n * 0.6))
+    # Rolling Window: nur letzte ~500 Handelstage (ca. 2 Jahre) trainieren
+    # Ältere Daten veralten — Märkte sind nicht stationär
+    window_size = min(500, n)
+    X_rolling   = X.iloc[-window_size:]
+    y_rolling   = y.iloc[-window_size:]
+    n_roll      = len(X_rolling)
+
+    # Walk-Forward auf dem Rolling Window
+    min_train = min(200, int(n_roll * 0.6))
     step      = 20
     preds, trues = [], []
 
-    for end in range(min_train, n - step, step):
-        X_train = X.iloc[:end]
-        y_train = y.iloc[:end]
-        X_test  = X.iloc[end:end+step]
-        y_test  = y.iloc[end:end+step]
+    for end in range(min_train, n_roll - step, step):
+        X_train = X_rolling.iloc[:end]
+        y_train = y_rolling.iloc[:end]
+        X_test  = X_rolling.iloc[end:end+step]
+        y_test  = y_rolling.iloc[end:end+step]
+        if y_train.nunique() < 2:
+            continue
         try:
             base = GradientBoostingClassifier(n_estimators=100, max_depth=3,
                                               learning_rate=0.05, random_state=42)
@@ -232,21 +249,25 @@ def modell(df, lag):
         except Exception:
             continue
 
-    wf_acc = accuracy_score(trues, preds) if preds else 0.5
+    wf_acc = accuracy_score(trues, preds) if len(preds) > 10 else 0.5
 
-    # Finales Modell auf allen Daten trainieren (für Live-Prognose)
+    # Finales Modell auf Rolling Window trainieren
+    # sigmoid: stabiler als isotonic bei ~500 Datenpunkten
     base_final = GradientBoostingClassifier(n_estimators=100, max_depth=3,
                                             learning_rate=0.05, random_state=42)
-    m = CalibratedClassifierCV(base_final, cv=3, method="isotonic")
-    m.fit(X, y)
-    prob = m.predict_proba(X.iloc[[-1]])[0][1]
+    m = CalibratedClassifierCV(base_final, cv=3, method="sigmoid")
+    if y_rolling.nunique() >= 2:
+        m.fit(X_rolling, y_rolling)
+    else:
+        m.fit(X, y)
+    prob = m.predict_proba(X_rolling.iloc[[-1]])[0][1]
 
     imp = None
     try:
         imp = dict(zip(FCOLS, m.calibrated_classifiers_[0].estimator.feature_importances_))
     except Exception:
         pass
-    return prob, wf_acc, imp, m, X
+    return prob, wf_acc, imp, m, X_rolling
 
 # ── TREFFERQUOTE ──────────────────────────────────────────────────────────────
 def trefferquote(m, X, df, h=20):
@@ -772,11 +793,30 @@ if start:
     st.caption("Sektor: " + meta.get("sector", "-"))
 
     c1, c2, c3, c4, c5 = st.columns(5)
+    # Regime bestimmen
+    regime_val  = int(df["Regime"].iloc[-1]) if "Regime" in df.columns else -1
+    regime_map  = {3: "🟢 Bulle / ruhig", 2: "🟡 Bulle / volatil",
+                   1: "🟠 Bär / ruhig",   0: "🔴 Bär / volatil"}
+    regime_txt  = regime_map.get(regime_val, "–")
+    sma200_val  = float(df["SMA200"].iloc[-1]) if "SMA200" in df.columns else None
+
     c1.metric("Preis",        f"{preis:.2f}")
     c2.metric("RSI",          f"{rsi:.1f}")
     c3.metric("KI-Konfidenz", f"{konf*100:.0f}%")
-    c4.metric("Accuracy",     f"{acc*100:.0f}%")
+    c4.metric("Accuracy (WF)",f"{acc*100:.0f}%",
+              help="Walk-Forward Accuracy — realistischer als einfacher Split")
     c5.metric("Div.-Rendite", f"{dv['yield']:.1f}%", help=dv.get("quelle",""))
+
+    # Regime-Banner
+    regime_colors = {3:"success", 2:"warning", 1:"warning", 0:"error"}
+    regime_help   = {
+        3: "SMA50 > SMA200 (Aufwärtstrend) + Volatilität niedrig → optimale Kaufbedingungen",
+        2: "SMA50 > SMA200 (Aufwärtstrend) + Volatilität erhöht → Trend intakt, aber unruhig",
+        1: "SMA50 < SMA200 (Abwärtstrend) + Volatilität niedrig → Seitwärtsphase",
+        0: "SMA50 < SMA200 (Abwärtstrend) + Volatilität hoch → Risiko-Regime, Vorsicht",
+    }
+    st.info(f"**Marktregime:** {regime_txt}   |   {regime_help.get(regime_val, '')}  "
+            + (f"  |  SMA200: {sma200_val:.2f} EUR" if sma200_val else ""))
 
     if manuell_div > 0:
         st.info(f"⚠️ Dividende manuell: **{manuell_div:.2f} EUR/Aktie** "
