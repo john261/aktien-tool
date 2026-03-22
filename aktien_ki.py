@@ -315,6 +315,90 @@ def kz(paths, kauf):
         "ret":  float((np.percentile(ep, 50) - kauf) / kauf * 100),
     }
 
+# ── BOOTSTRAP SIMULATION ─────────────────────────────────────────────────────
+def bootstrap(df, tage, n=1000, seed=42, div_pa=0):
+    """
+    Zieht echte historische Tagesrenditen mit Zurücklegen neu zusammen.
+    Bildet Fat Tails und Crashs realistischer ab als Normalverteilung.
+    """
+    np.random.seed(seed)
+    lr = np.log(df["Close"] / df["Close"].shift(1)).dropna().values
+    div_daily = div_pa / 252
+    S0 = float(df["Close"].iloc[-1])
+    idx = np.random.randint(0, len(lr), size=(n, tage))
+    r   = lr[idx] + div_daily
+    p   = S0 * np.exp(np.cumsum(r, axis=1))
+    p   = np.hstack([np.full((n, 1), S0), p])
+    return p
+
+# ── GARCH(1,1) SIMULATION ─────────────────────────────────────────────────────
+def garch(df, tage, n=1000, seed=42, div_pa=0):
+    """
+    GARCH(1,1): Volatilität ist zeitvariabel — nach Schocks steigt sie, in
+    ruhigen Phasen sinkt sie wieder. Realistischer als konstante Vola.
+    """
+    np.random.seed(seed)
+    lr   = np.log(df["Close"] / df["Close"].shift(1)).dropna().values
+    mu   = float(lr.mean()) + div_pa / 252
+    # GARCH-Parameter via Momentenschätzung
+    var  = float(lr.var())
+    omega = var * 0.05
+    alpha = 0.10   # Gewicht letztes Schock²
+    beta  = 0.85   # Gewicht letzte Varianz
+    S0   = float(df["Close"].iloc[-1])
+    paths = np.zeros((n, tage + 1))
+    paths[:, 0] = S0
+    h = np.full(n, var)   # Startvarianz für alle Pfade
+    for t in range(tage):
+        eps  = np.random.standard_normal(n)
+        ret  = mu - 0.5 * h + np.sqrt(h) * eps
+        paths[:, t+1] = paths[:, t] * np.exp(ret)
+        h = omega + alpha * (ret - mu)**2 + beta * h
+        h = np.clip(h, 1e-9, None)
+    return paths
+
+# ── SIMULATIONS-VERGLEICH ─────────────────────────────────────────────────────
+def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
+    """Erstellt einen Vergleichs-Chart aller drei Simulationsmethoden."""
+    methods = [
+        ("Monte Carlo", mc_paths, "#4a9eff"),
+        ("Bootstrap",   bs_paths, "#f0a000"),
+        ("GARCH(1,1)",  gc_paths, "#00c87a"),
+    ]
+    fig = go.Figure()
+    for name, paths, color in methods:
+        ep = paths[:, -1]
+        gwkt = float(np.mean(ep > kauf)) * 100
+        med  = float(np.percentile(ep, 50))
+        ret  = (med - kauf) / kauf * 100
+        label = f"{name}: {gwkt:.0f}% Gewinn | Median {ret:+.1f}%"
+        # Kerze: p5–p95 Band + Median-Linie
+        x_days = list(range(paths.shape[1]))
+        p5  = list(np.percentile(paths, 5,  axis=0))
+        p95 = list(np.percentile(paths, 95, axis=0))
+        p50 = list(np.percentile(paths, 50, axis=0))
+        fig.add_trace(go.Scatter(
+            x=x_days, y=p95, showlegend=False,
+            line=dict(color="rgba(0,0,0,0)", width=0)))
+        fig.add_trace(go.Scatter(
+            x=x_days, y=p5, name=label,
+            line=dict(color="rgba(0,0,0,0)", width=0),
+            fill="tonexty",
+            fillcolor=color.replace(")", ",0.12)").replace("rgb", "rgba") if "rgb" in color
+                       else color + "1f"))
+        fig.add_trace(go.Scatter(
+            x=x_days, y=p50, name=label + " (Median)",
+            line=dict(color=color, width=2, dash="dot")))
+    fig.add_hline(y=kauf, line_dash="dash", line_color="rgba(255,77,106,0.6)",
+                  annotation_text="Kaufkurs")
+    fig.update_layout(
+        template="plotly_dark", height=420,
+        title="Simulationsvergleich — 90%-Band + Median",
+        paper_bgcolor="#0d0f14", plot_bgcolor="#0d0f14",
+        xaxis_title="Handelstage", yaxis_title="Kurs (EUR)",
+    )
+    return fig
+
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
 def signal(prob, rsi, sma20, sma50, macd_h):
     g, s = [], 0.0
@@ -530,6 +614,16 @@ if start:
         p1, _,  _     = monte_carlo(df, 252, 1000, div_pa=dv["yield"]/100)
         k6 = kz(p6, preis)
         k1 = kz(p1, preis)
+        # Bootstrap
+        bs6 = bootstrap(df, 126, 1000, seed=7,  div_pa=dv["yield"]/100)
+        bs1 = bootstrap(df, 252, 1000, seed=7,  div_pa=dv["yield"]/100)
+        kb6 = kz(bs6, preis)
+        kb1 = kz(bs1, preis)
+        # GARCH
+        gc6 = garch(df, 126, 1000, seed=13, div_pa=dv["yield"]/100)
+        gc1 = garch(df, 252, 1000, seed=13, div_pa=dv["yield"]/100)
+        kg6 = kz(gc6, preis)
+        kg1 = kz(gc1, preis)
 
     # ── Header ────────────────────────────────────────────────────────────────
     st.subheader(meta.get("name", ticker) + " (" + ticker + ")")
@@ -682,6 +776,48 @@ if start:
                    f"oben {k1['p95']:.0f} ({(k1['p95']-preis)/preis*100:+.0f}%)")
 
     st.plotly_chart(chart_prognose(df, p6, p1, preis, ticker), use_container_width=True)
+
+    # ── Simulationsvergleich ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🔬 Simulationsvergleich")
+    st.caption("Alle drei Methoden auf einen Blick — stimmen sie überein, erhöht das die Verlässlichkeit.")
+
+    sim_tab = st.tabs(["6 Monate", "1 Jahr"])
+    for tab, horizon_label, kmc, kbs, kgc in [
+        (sim_tab[0], "6 Monate", k6, kb6, kg6),
+        (sim_tab[1], "1 Jahr",   k1, kb1, kg1),
+    ]:
+        with tab:
+            sc1, sc2, sc3 = st.columns(3)
+            for col, label, k, color in [
+                (sc1, "📐 Monte Carlo", kmc, "normal"),
+                (sc2, "🎲 Bootstrap",   kbs, "normal"),
+                (sc3, "📈 GARCH(1,1)",  kgc, "normal"),
+            ]:
+                with col:
+                    st.markdown(f"**{label}**")
+                    gwkt_val = round(k["gwkt"]*100)
+                    ret_val  = round(k["ret"] + dv["r6" if horizon_label=="6 Monate" else "r1"], 1)
+                    col.metric("Gewinn-Wkt.", f"{gwkt_val} %")
+                    col.metric("Erw. Ertrag", f"+{ret_val} %",
+                               delta_color="normal" if ret_val >= 0 else "inverse")
+                    col.metric("Median-Kurs", f"{k['p50']:.2f} EUR")
+                    col.metric("Worst Case",  f"{k['p5']:.0f} EUR",
+                               f"{(k['p5']-preis)/preis*100:+.0f}%",
+                               delta_color="inverse")
+
+            # Übereinstimmungs-Hinweis
+            gwkts = [round(kmc["gwkt"]*100), round(kbs["gwkt"]*100), round(kgc["gwkt"]*100)]
+            spanne = max(gwkts) - min(gwkts)
+            if spanne <= 5:
+                st.success(f"✅ Alle drei Methoden stimmen überein (Spanne: {spanne} %) — hohes Vertrauen in die Prognose.")
+            elif spanne <= 15:
+                st.warning(f"⚠️ Leichte Abweichungen zwischen den Methoden (Spanne: {spanne} %) — Prognose mit Vorsicht interpretieren.")
+            else:
+                st.error(f"❌ Große Abweichungen (Spanne: {spanne} %) — die Aktie verhält sich unregelmäßig, Prognosen unsicher.")
+
+    # Vergleichs-Chart (1 Jahr)
+    st.plotly_chart(sim_vergleich(p1, bs1, gc1, preis, preis), use_container_width=True)
 
     # ── Gesamtfazit ───────────────────────────────────────────────────────────
     st.markdown("---")
