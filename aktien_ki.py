@@ -502,25 +502,44 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
 def signal(prob, rsi, sma20, sma50, macd_h):
     """
-    Timing-Signal: Bewertet NUR ob der aktuelle Moment technisch günstig ist
-    für einen Einstieg — nicht ob die Aktie langfristig gut ist.
-    Das ist Aufgabe der Simulation.
+    Timing-Signal: Bewertet NUR ob der aktuelle Moment technisch günstig ist.
+    Gewichtung: Trend (SMA) ist wichtigster Faktor, RSI zeigt Einstiegszeitpunkt,
+    MACD und ML sind ergänzende Signale mit geringerer Gewichtung.
     """
     g, s = [], 0.0
-    s += (prob - 0.5) * 2 * 0.5
-    g.append(f"ML: {prob*100:.1f}%")
-    if rsi < 30:   s += 0.25; g.append(f"RSI {rsi:.0f} - ueberverkauft")
-    elif rsi > 70: s -= 0.25; g.append(f"RSI {rsi:.0f} - ueberkauft")
-    elif rsi < 45: s -= 0.10; g.append(f"RSI {rsi:.0f} - leicht baerisch")
-    elif rsi > 55: s += 0.10; g.append(f"RSI {rsi:.0f} - leicht bullisch")
-    else:          g.append(f"RSI {rsi:.0f} - neutral")
-    if sma20 > sma50: s += 0.15; g.append("SMA20 > SMA50 - Aufwaertstrend")
-    else:             s -= 0.15; g.append("SMA20 < SMA50 - Abwaertstrend")
-    if macd_h > 0: s += 0.10; g.append("MACD positiv")
-    else:          s -= 0.10; g.append("MACD negativ")
 
-    # Timing-Label statt KAUFEN/VERKAUFEN
-    if s > 0.20:
+    # Trend ist der stärkste Faktor (0.30) — Aufwärtstrend = guter Einstieg
+    if sma20 > sma50:
+        s += 0.30; g.append("SMA20 > SMA50 - Aufwaertstrend")
+    else:
+        s -= 0.30; g.append("SMA20 < SMA50 - Abwaertstrend")
+
+    # RSI: Überverkauft = günstig, Überkauft = ungünstig (0.25)
+    if rsi < 30:
+        s += 0.30; g.append(f"RSI {rsi:.0f} - stark ueberverkauft (Einstiegschance)")
+    elif rsi < 40:
+        s += 0.15; g.append(f"RSI {rsi:.0f} - ueberverkauft")
+    elif rsi < 50:
+        s += 0.05; g.append(f"RSI {rsi:.0f} - leicht gedrückt")
+    elif rsi < 60:
+        g.append(f"RSI {rsi:.0f} - neutral")
+    elif rsi < 70:
+        s -= 0.10; g.append(f"RSI {rsi:.0f} - leicht erhoben")
+    else:
+        s -= 0.25; g.append(f"RSI {rsi:.0f} - ueberkauft")
+
+    # MACD: ergänzendes Signal (0.10)
+    if macd_h > 0:
+        s += 0.10; g.append("MACD positiv")
+    else:
+        s -= 0.10; g.append("MACD negativ")
+
+    # ML: kurzfristiges Zusatzsignal (0.10) — weniger Gewicht als Trend
+    s += (prob - 0.5) * 0.20
+    g.append(f"ML: {prob*100:.1f}%")
+
+    # Timing-Label
+    if s > 0.25:
         timing = "Günstiger Einstiegszeitpunkt"
         timing_ico = "🟢"
     elif s > 0.05:
@@ -529,14 +548,14 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     elif s > -0.05:
         timing = "Neutraler Moment"
         timing_ico = "🟡"
-    elif s > -0.20:
+    elif s > -0.25:
         timing = "Eher ungünstiger Moment"
         timing_ico = "🟠"
     else:
         timing = "Ungünstiger Einstiegszeitpunkt"
         timing_ico = "🔴"
 
-    return timing, timing_ico, min(abs(s)/0.55, 1.0), g, s
+    return timing, timing_ico, min(abs(s)/0.65, 1.0), g, s
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
