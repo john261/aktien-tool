@@ -603,7 +603,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
 
     tech_block = ""
     if tech_lines:
-        tech_block = "\n\n**Technische Einschätzung:**\n" + "  \n".join(f"— {l}" for l in tech_lines)
+        tech_block = "\n\n**Technische Einschätzung:**\n\n" + "\n\n".join(f"— {l}" for l in tech_lines)
 
     # ── Analysten-Divergenz ──────────────────────────────────────────────────
     analyst_block = ""
