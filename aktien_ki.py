@@ -520,7 +520,7 @@ def signal(prob, rsi, sma20, sma50, macd_h):
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 g6tot, g1tot, sl, rp, rvmax, k6, k1, sig,
                 ana=None, gc_info=None,
-                rsi=None, sma20=None, sma50=None, sma200=None, macd_h=None):
+                rsi=None, sma20=None, sma50=None, sma200=None, macd_h=None, dv=None):
     xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
     xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
@@ -604,6 +604,91 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     tech_block = ""
     if tech_lines:
         tech_block = "\n\n**Technische Einschätzung:**\n\n" + "\n\n".join(f"— {l}" for l in tech_lines)
+
+    # ── Gesamtbild Checkliste ────────────────────────────────────────────────
+    gesamtbild_lines = []
+
+    # Simulation
+    if gwkt1 >= 75:
+        gesamtbild_lines.append(f"✅ **Simulation:** {gwkt1} % Gewinnwahrscheinlichkeit auf Jahressicht — stark")
+    elif gwkt1 >= 60:
+        gesamtbild_lines.append(f"🟡 **Simulation:** {gwkt1} % Gewinnwahrscheinlichkeit — solide")
+    else:
+        gesamtbild_lines.append(f"🔴 **Simulation:** nur {gwkt1} % Gewinnwahrscheinlichkeit — schwach")
+
+    # Analysten
+    if ana and ana.get("ziel") and preis > 0:
+        upside_ana = (ana["ziel"] - preis) / preis * 100
+        if upside_ana >= 15:
+            gesamtbild_lines.append(f"✅ **Analysten:** noch {upside_ana:.1f} % Upside zum Kursziel ({ana['ziel']:.0f} EUR)")
+        elif upside_ana >= 5:
+            gesamtbild_lines.append(f"🟡 **Analysten:** {upside_ana:.1f} % Upside zum Kursziel ({ana['ziel']:.0f} EUR) — begrenzt")
+        elif upside_ana >= 0:
+            gesamtbild_lines.append(f"🟡 **Analysten:** Kurs fast am Kursziel ({ana['ziel']:.0f} EUR) — kaum Spielraum")
+        else:
+            gesamtbild_lines.append(f"🔴 **Analysten:** Kurs über Kursziel — Analysten sehen Rückgang")
+
+    # Dividende
+    if dv and dv.get("yield", 0) > 0:
+        yld = dv["yield"]
+        if yld >= 3:
+            gesamtbild_lines.append(f"✅ **Dividende:** {yld:.1f} % — attraktive Ausschüttung on top")
+        elif yld > 0:
+            gesamtbild_lines.append(f"🟡 **Dividende:** {yld:.1f} % — moderate Ausschüttung")
+    else:
+        gesamtbild_lines.append(f"⚪ **Dividende:** keine Ausschüttung")
+
+    # RSI
+    if rsi is not None:
+        if rsi < 30:
+            gesamtbild_lines.append(f"✅ **RSI {rsi:.1f}** — massiv überverkauft, mögliches Einstiegsfenster")
+        elif rsi < 45:
+            gesamtbild_lines.append(f"✅ **RSI {rsi:.1f}** — leicht gedrückt, kein überhitzter Einstieg")
+        elif rsi <= 60:
+            gesamtbild_lines.append(f"🟡 **RSI {rsi:.1f}** — neutral, kein Warnsignal")
+        elif rsi <= 70:
+            gesamtbild_lines.append(f"🟡 **RSI {rsi:.1f}** — leicht erhitzt, Vorsicht bei Einstieg")
+        else:
+            gesamtbild_lines.append(f"🔴 **RSI {rsi:.1f}** — überkauft, schlechter Einstiegszeitpunkt")
+
+    # KI-Signal
+    if sig == "KAUFEN":
+        gesamtbild_lines.append(f"✅ **KI-Signal:** KAUFEN — klares Einstiegssignal")
+    elif sig == "HALTEN":
+        gesamtbild_lines.append(f"🟡 **KI-Signal:** HALTEN — kein starkes Signal in beide Richtungen")
+    else:
+        gesamtbild_lines.append(f"🔴 **KI-Signal:** VERKAUFEN — technische Warnung")
+
+    # Trend
+    if sma20 is not None and sma50 is not None and sma200 is not None:
+        if sma20 > sma50 and sma50 > sma200:
+            gesamtbild_lines.append(f"✅ **Trend:** kurz- und langfristig aufwärts — starke Trendstruktur")
+        elif sma50 > sma200:
+            gesamtbild_lines.append(f"🟡 **Trend:** Langfristtrend intakt, kurzfristig leicht schwächer")
+        else:
+            gesamtbild_lines.append(f"🔴 **Trend:** Langfristtrend gebrochen — struktureller Gegenwind")
+
+    # Zähle Ampeln
+    green  = sum(1 for l in gesamtbild_lines if l.startswith("✅"))
+    yellow = sum(1 for l in gesamtbild_lines if l.startswith("🟡"))
+    red    = sum(1 for l in gesamtbild_lines if l.startswith("🔴"))
+
+    if green >= 4:
+        fazit_ampel = "**Gesamtbild: sehr positiv** — die meisten Faktoren sprechen für einen Einstieg."
+    elif green >= 3 and red == 0:
+        fazit_ampel = "**Gesamtbild: solide** — überwiegend positive Signale, keine klaren Warnsignale."
+    elif red >= 3:
+        fazit_ampel = "**Gesamtbild: negativ** — mehrere Faktoren sprechen gegen einen Einstieg."
+    elif red >= 2:
+        fazit_ampel = "**Gesamtbild: gemischt mit Risiken** — mit Vorsicht und kleiner Position agieren."
+    else:
+        fazit_ampel = "**Gesamtbild: neutral** — abwägen und Entwicklung beobachten."
+
+    gesamtbild_block = (
+        f"\n\n**Auf einen Blick:**\n\n"
+        + "\n\n".join(gesamtbild_lines)
+        + f"\n\n{fazit_ampel}"
+    )
 
     # ── Einstiegsempfehlung ──────────────────────────────────────────────────
     empfehlung_block = ""
@@ -746,7 +831,7 @@ Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** \
 ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, was der Markt macht.
 
 **Fazit:** Bei {name} {sig_text}. {risiko_einschaetzung} \
-Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{tech_block}{empfehlung_block}{analyst_block}
+Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{gesamtbild_block}{tech_block}{empfehlung_block}{analyst_block}
 """.strip()
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
@@ -1146,7 +1231,7 @@ if start:
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
         k6=k6, k1=k1, sig=sig, ana=ana, gc_info=gc_info,
-        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h,
+        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h, dv=dv,
     ))
 
     st.markdown("---")
