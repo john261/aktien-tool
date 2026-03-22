@@ -443,7 +443,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
 
         differenz = abs(upside - sim_ret)
 
-        if differenz >= 20:
+        if differenz >= 15:
             richtung = "deutlich optimistischer" if upside > sim_ret else "deutlich pessimistischer"
             empf_map = {
                 "strong_buy": "Starker Kauf", "buy": "Kaufen",
@@ -502,7 +502,7 @@ Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** \
 ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, was der Markt macht.
 
 **Fazit:** Bei {name} {sig_text}. {risiko_einschaetzung} \
-Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.
+Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{analyst_block}
 """.strip()
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
@@ -577,6 +577,10 @@ wkn_input = st.sidebar.text_input(
     max_chars=6,
     help="6-stellige Wertpapierkennnummer, z.B. 843002 für Munich Re"
 ).strip().upper()
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Simulation**")
+n_sim = st.sidebar.select_slider("Simulationen (Monte Carlo)", [500, 1000, 2000, 5000], value=1000)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Risiko**")
@@ -657,18 +661,18 @@ if start:
         rvmax = nakt * vpa
 
         dv = div_info(divs, preis, nakt, meta.get("div_yield", 0), manuell_div)
-        p6, mu, sigma = monte_carlo(df, 126, 1000, div_pa=dv["yield"]/100)
-        p1, _,  _     = monte_carlo(df, 252, 1000, div_pa=dv["yield"]/100)
+        p6, mu, sigma = monte_carlo(df, 126, n_sim, div_pa=dv["yield"]/100)
+        p1, _,  _     = monte_carlo(df, 252, n_sim, div_pa=dv["yield"]/100)
         k6 = kz(p6, preis)
         k1 = kz(p1, preis)
         # Bootstrap
-        bs6 = bootstrap(df, 126, 1000, seed=7,  div_pa=dv["yield"]/100)
-        bs1 = bootstrap(df, 252, 1000, seed=7,  div_pa=dv["yield"]/100)
+        bs6 = bootstrap(df, 126, n_sim, seed=7,  div_pa=dv["yield"]/100)
+        bs1 = bootstrap(df, 252, n_sim, seed=7,  div_pa=dv["yield"]/100)
         kb6 = kz(bs6, preis)
         kb1 = kz(bs1, preis)
         # GARCH
-        gc6 = garch(df, 126, 1000, seed=13, div_pa=dv["yield"]/100)
-        gc1 = garch(df, 252, 1000, seed=13, div_pa=dv["yield"]/100)
+        gc6 = garch(df, 126, n_sim, seed=13, div_pa=dv["yield"]/100)
+        gc1 = garch(df, 252, n_sim, seed=13, div_pa=dv["yield"]/100)
         kg6 = kz(gc6, preis)
         kg1 = kz(gc1, preis)
 
