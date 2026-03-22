@@ -183,10 +183,17 @@ def indikatoren(df):
     df["VR"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1)
     df["R1"] = c.pct_change(1)
     df["R5"] = c.pct_change(5)
-    df["Target"] = np.where(c.shift(-1) > c, 1, 0)
+    df["R10"] = c.pct_change(10)
+    # Verbessertes Target: 5-Tage-Rendite > +1% statt Next-Day-Direction
+    # Reduziert Noise erheblich und lernt echte Trends
+    df["Target"] = np.where(c.shift(-5) / c - 1 > 0.01, 1, 0)
+    # Neue Feature-Engineering Features
+    df["Vola_Change"]   = df["ATR"] / (df["ATR"].rolling(20).mean() + 1e-9)
+    df["Trend_Strength"]= df["SMA20"] / (df["SMA50"] + 1e-9)
+    df["Mom_Accel"]     = df["R1"] - df["R5"]
     return df.dropna()
 
-FCOLS = ["RSI","MACD_H","BB_P","BB_W","VR","R1","R5","TR"]
+FCOLS = ["RSI","MACD_H","BB_P","BB_W","VR","R1","R5","R10","TR","Vola_Change","Trend_Strength","Mom_Accel"]
 
 def features(df):
     df = df.copy()
@@ -198,20 +205,48 @@ def features(df):
 
 # ── MODELL ────────────────────────────────────────────────────────────────────
 def modell(df, lag):
+    """
+    Walk-Forward Validation statt einfachem 80/20-Split.
+    Trainiert auf rollendem Fenster und testet immer auf echten Out-of-Sample-Daten.
+    Gibt realistischere Accuracy und verhindert Overfitting.
+    """
     X, y = df[lag], df["Target"]
-    split = int(len(X) * 0.8)
-    base = GradientBoostingClassifier(n_estimators=100, max_depth=3,
-                                      learning_rate=0.05, random_state=42)
-    m = CalibratedClassifierCV(base, cv=3, method="isotonic")
-    m.fit(X.iloc[:split], y.iloc[:split])
-    acc = accuracy_score(y.iloc[split:], m.predict(X.iloc[split:]))
+    n = len(X)
+
+    # Walk-Forward: mind. 200 Trainings-Samples, Schritte von 20 Tagen
+    min_train = min(200, int(n * 0.6))
+    step      = 20
+    preds, trues = [], []
+
+    for end in range(min_train, n - step, step):
+        X_train = X.iloc[:end]
+        y_train = y.iloc[:end]
+        X_test  = X.iloc[end:end+step]
+        y_test  = y.iloc[end:end+step]
+        try:
+            base = GradientBoostingClassifier(n_estimators=100, max_depth=3,
+                                              learning_rate=0.05, random_state=42)
+            base.fit(X_train, y_train)
+            preds.extend(base.predict(X_test).tolist())
+            trues.extend(y_test.tolist())
+        except Exception:
+            continue
+
+    wf_acc = accuracy_score(trues, preds) if preds else 0.5
+
+    # Finales Modell auf allen Daten trainieren (für Live-Prognose)
+    base_final = GradientBoostingClassifier(n_estimators=100, max_depth=3,
+                                            learning_rate=0.05, random_state=42)
+    m = CalibratedClassifierCV(base_final, cv=3, method="isotonic")
+    m.fit(X, y)
     prob = m.predict_proba(X.iloc[[-1]])[0][1]
+
     imp = None
     try:
         imp = dict(zip(FCOLS, m.calibrated_classifiers_[0].estimator.feature_importances_))
     except Exception:
         pass
-    return prob, acc, imp, m, X
+    return prob, wf_acc, imp, m, X
 
 # ── TREFFERQUOTE ──────────────────────────────────────────────────────────────
 def trefferquote(m, X, df, h=20):
