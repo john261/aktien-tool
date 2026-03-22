@@ -1261,7 +1261,7 @@ if start:
         gwkt6=gwkt6, gwkt1=gwkt1,
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
-        k6=k6, k1=k1, sig=sig, ana=ana, gc_info=gc_info,
+        k6=k6, k1=k1, sig=timing, ana=ana, gc_info=gc_info,
         rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h, dv=dv, score=score,
     ))
 
