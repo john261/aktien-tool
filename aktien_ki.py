@@ -518,7 +518,9 @@ def signal(prob, rsi, sma20, sma50, macd_h):
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
-                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig, ana=None, gc_info=None):
+                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig,
+                ana=None, gc_info=None,
+                rsi=None, sma20=None, sma50=None, sma200=None, macd_h=None):
     xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
     xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
@@ -536,6 +538,76 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis ist insgesamt ausgeglichen, mit einem leichten Vorteil auf der Gewinnseite."
     else:
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis verdient besondere Aufmerksamkeit — mehr als ein Drittel der Szenarien endet im Minus."
+
+    # ── Technischer Kontext ──────────────────────────────────────────────────
+    tech_lines = []
+
+    if rsi is not None and sma20 is not None and sma50 is not None:
+
+        # Langfristiger Trend (SMA200)
+        if sma200 is not None:
+            if sma50 > sma200:
+                tech_lines.append(
+                    f"**SMA50 ({sma50:.2f}) > SMA200 ({sma200:.2f})** — der langfristige Aufwärtstrend ist intakt. "
+                    f"Langfristig spricht die Trendstruktur noch für die Aktie."
+                )
+            else:
+                tech_lines.append(
+                    f"**SMA50 ({sma50:.2f}) < SMA200 ({sma200:.2f})** — der langfristige Trend zeigt abwärts. "
+                    f"Solange SMA50 unter SMA200 bleibt, ist struktureller Gegenwind vorhanden."
+                )
+
+        # Kurzfristiger Trend (SMA20 vs SMA50)
+        if sma20 < sma50:
+            tech_lines.append(
+                f"**SMA20 ({sma20:.2f}) < SMA50 ({sma50:.2f})** — der kurzfristige Trend dreht bereits ab. "
+                f"Das zeigt, dass der Kurs in den letzten Wochen schwächer war als der mittelfristige Schnitt."
+            )
+        else:
+            tech_lines.append(
+                f"**SMA20 ({sma20:.2f}) > SMA50 ({sma50:.2f})** — kurzfristiger Aufwärtsschub bestätigt den Trend."
+            )
+
+        # RSI-Interpretation
+        if rsi < 30:
+            tech_lines.append(
+                f"**RSI {rsi:.1f} — massiv überverkauft.** Bei einem RSI unter 30 ist die Aktie technisch "
+                f"stark ausverkauft. Das bedeutet nicht automatisch eine Trendwende, kann aber ein "
+                f"Einstiegssignal sein — besonders wenn gleichzeitig die Fundamentaldaten stimmen."
+            )
+        elif rsi < 40:
+            tech_lines.append(
+                f"**RSI {rsi:.1f} — überverkauft.** Die Aktie zeigt Schwäche, ist aber noch nicht im "
+                f"extremen Ausverkaufsbereich."
+            )
+        elif rsi > 70:
+            tech_lines.append(
+                f"**RSI {rsi:.1f} — überkauft.** Die Aktie ist kurzfristig heiß gelaufen. "
+                f"Ein Rücksetzer wäre technisch normal."
+            )
+        elif rsi > 60:
+            tech_lines.append(
+                f"**RSI {rsi:.1f} — leicht überkauft**, aber noch im normalen Bereich."
+            )
+        else:
+            tech_lines.append(
+                f"**RSI {rsi:.1f} — neutral.** Weder überkauft noch überverkauft."
+            )
+
+        # MACD
+        if macd_h is not None:
+            if macd_h > 0:
+                tech_lines.append(f"**MACD positiv** — kurzfristiger Momentum-Schub bestätigt.")
+            else:
+                tech_lines.append(f"**MACD negativ** — Momentum zeigt aktuell abwärts.")
+
+    tech_block = ""
+    if tech_lines:
+        tech_block = "
+
+**Technische Einschätzung:**
+" + "  
+".join(f"— {l}" for l in tech_lines)
 
     # ── Analysten-Divergenz ──────────────────────────────────────────────────
     analyst_block = ""
@@ -612,7 +684,7 @@ Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** \
 ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, was der Markt macht.
 
 **Fazit:** Bei {name} {sig_text}. {risiko_einschaetzung} \
-Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{analyst_block}
+Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{tech_block}{analyst_block}
 """.strip()
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
@@ -1004,6 +1076,7 @@ if start:
     # ── Gesamtfazit ───────────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("📝 Gesamtfazit")
+    sma200_fazit = float(df["SMA200"].iloc[-1]) if "SMA200" in df.columns else None
     st.markdown(gesamtfazit(
         name=meta.get("name", ticker), ticker=ticker,
         preis=preis, inv=inv, nakt=nakt,
@@ -1011,6 +1084,7 @@ if start:
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
         k6=k6, k1=k1, sig=sig, ana=ana, gc_info=gc_info,
+        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h,
     ))
 
     st.markdown("---")
