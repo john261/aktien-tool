@@ -605,6 +605,72 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     if tech_lines:
         tech_block = "\n\n**Technische Einschätzung:**\n\n" + "\n\n".join(f"— {l}" for l in tech_lines)
 
+    # ── Einstiegsempfehlung ──────────────────────────────────────────────────
+    empfehlung_block = ""
+    if rsi is not None and sma20 is not None and sma50 is not None:
+
+        # Fall 1: Massiv überverkauft + Langfristtrend intakt → Tranchen-Einstieg
+        if rsi < 30 and sma200 is not None and sma50 > sma200 and gwkt1 >= 50:
+            empfehlung_block = (
+                f"\n\n**💡 Einstiegsempfehlung — Tranchen-Strategie:**\n\n"
+                f"Der RSI von {rsi:.1f} zeigt einen extremen Ausverkauf — gleichzeitig ist der "
+                f"langfristige Trend (SMA200) noch intakt. Das ist eine klassische Konstellation "
+                f"für einen gestaffelten Einstieg:\n\n"
+                f"— **Erste Tranche jetzt:** kleine Position aufbauen, um den Ausverkauf zu nutzen\n\n"
+                f"— **Zweite Tranche:** wenn RSI über 30 dreht und SMA20 stabilisiert\n\n"
+                f"— **Dritte Tranche:** wenn Golden Cross eintritt (SMA20 > SMA50)\n\n"
+                f"So profitierst du vom tiefen Kurs ohne alles auf einmal zu riskieren."
+            )
+
+        # Fall 2: Überverkauft aber Langfristtrend gebrochen → abwarten
+        elif rsi < 30 and sma200 is not None and sma50 < sma200:
+            empfehlung_block = (
+                f"\n\n**⚠️ Einstiegsempfehlung — Abwarten:**\n\n"
+                f"Trotz RSI {rsi:.1f} (überverkauft) ist der langfristige Trend gebrochen "
+                f"(SMA50 unter SMA200). Das bedeutet strukturelle Schwäche — ein tiefer RSI "
+                f"allein reicht nicht als Kaufsignal. Erst wenn SMA50 wieder über SMA200 "
+                f"steigt, verbessert sich das Chance-Risiko-Verhältnis deutlich."
+            )
+
+        # Fall 3: Guter Aufwärtstrend + hohe Gewinnchance → direkt einsteigen
+        elif sma20 > sma50 and sma200 is not None and sma50 > sma200 and gwkt1 >= 70 and rsi < 65:
+            empfehlung_block = (
+                f"\n\n**✅ Einstiegsempfehlung — Direkt einsteigen:**\n\n"
+                f"Kurzfristiger und langfristiger Trend zeigen beide aufwärts, die Simulation "
+                f"bestätigt eine starke Gewinnwahrscheinlichkeit von {gwkt1} % auf Jahressicht — "
+                f"und der RSI ({rsi:.1f}) ist noch nicht überkauft. "
+                f"Das ist ein technisch sauberes Einstiegsfenster."
+            )
+
+        # Fall 4: Überkauft + hohe Gewinnwahrscheinlichkeit → auf Rücksetzer warten
+        elif rsi > 70 and gwkt1 >= 65:
+            empfehlung_block = (
+                f"\n\n**⏳ Einstiegsempfehlung — Auf Rücksetzer warten:**\n\n"
+                f"Die Aktie ist mit RSI {rsi:.1f} kurzfristig überkauft — ein Rücksetzer "
+                f"wäre technisch normal. Die langfristigen Aussichten sind gut ({gwkt1} % "
+                f"Gewinnwahrscheinlichkeit), aber ein günstigerer Einstieg bei RSI 50–60 "
+                f"würde das Chance-Risiko-Verhältnis verbessern."
+            )
+
+        # Fall 5: Schwache Gewinnchance + Abwärtstrend → nicht kaufen
+        elif gwkt1 < 50 and sma20 < sma50:
+            empfehlung_block = (
+                f"\n\n**🔴 Einstiegsempfehlung — Nicht kaufen:**\n\n"
+                f"Kurzfristiger Abwärtstrend (SMA20 unter SMA50) kombiniert mit einer "
+                f"Gewinnwahrscheinlichkeit von nur {gwkt1} % auf Jahressicht. "
+                f"Der technische und statistische Kontext spricht derzeit gegen einen Einstieg. "
+                f"Beobachten und auf eine Trendwende warten."
+            )
+
+        # Fall 6: Neutrales Bild → positionsgröße reduzieren
+        elif 50 <= gwkt1 < 65:
+            empfehlung_block = (
+                f"\n\n**🟡 Einstiegsempfehlung — Kleine Position, eng absichern:**\n\n"
+                f"Das Bild ist gemischt — {gwkt1} % Gewinnwahrscheinlichkeit ist nicht stark "
+                f"genug für eine volle Position. Falls du einsteigen möchtest, "
+                f"empfiehlt sich eine halbe Positionsgröße mit engem Stop-Loss bei –{rp} %."
+            )
+
     # ── Analysten-Divergenz ──────────────────────────────────────────────────
     analyst_block = ""
     if ana and ana.get("ziel") and preis > 0:
@@ -680,7 +746,7 @@ Mit dem gesetzten Stop-Loss bei **{sl:.2f} EUR (–{rp} %)** \
 ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig davon, was der Markt macht.
 
 **Fazit:** Bei {name} {sig_text}. {risiko_einschaetzung} \
-Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{tech_block}{analyst_block}
+Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{tech_block}{empfehlung_block}{analyst_block}
 """.strip()
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
