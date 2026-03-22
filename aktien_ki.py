@@ -315,6 +315,53 @@ def kz(paths, kauf):
         "ret":  float((np.percentile(ep, 50) - kauf) / kauf * 100),
     }
 
+# ── GOLDEN CROSS BERECHNUNG ──────────────────────────────────────────────────
+def golden_cross_prognose(df):
+    """
+    Berechnet ab welchem Kursniveau und in ca. wie vielen Tagen
+    ein Golden Cross (SMA20 > SMA50) eintreten würde.
+    """
+    closes = df["Close"].values
+    sma20_last = float(df["SMA20"].iloc[-1])
+    sma50_last = float(df["SMA50"].iloc[-1])
+
+    # Nur relevant wenn SMA20 < SMA50 (Abwärtstrend)
+    if sma20_last >= sma50_last:
+        return None
+
+    # SMA50 in 20 Tagen simulieren (annähernde Konstante, da träge)
+    # SMA50 ändert sich täglich um: (neuer_kurs - kurs_vor_50_tagen) / 50
+    recent_50 = closes[-50:]
+    oldest_in_50 = closes[-50]  # fällt morgen raus
+
+    # Wir suchen: welcher konstante Tageskurs X führt dazu dass
+    # nach n Tagen SMA20(X) > SMA50(X)?
+    # Simulation: täglich X einfügen und SMAs neu berechnen
+    best_kurs  = None
+    best_tage  = None
+
+    for kurs_kandidat in np.arange(
+        float(df["Close"].iloc[-1]) * 0.95,
+        float(df["Close"].iloc[-1]) * 1.50,
+        float(df["Close"].iloc[-1]) * 0.005
+    ):
+        sim_closes = list(closes.copy())
+        crossed = False
+        for tag in range(1, 61):  # max 60 Tage simulieren
+            sim_closes.append(kurs_kandidat)
+            s20 = np.mean(sim_closes[-20:])
+            s50 = np.mean(sim_closes[-50:])
+            if s20 > s50:
+                if best_tage is None or tag < best_tage:
+                    best_kurs = kurs_kandidat
+                    best_tage = tag
+                crossed = True
+                break
+        if crossed and best_tage <= 5:
+            break
+
+    return {"kurs": best_kurs, "tage": best_tage, "sma20": sma20_last, "sma50": sma50_last}
+
 # ── BOOTSTRAP SIMULATION ─────────────────────────────────────────────────────
 def bootstrap(df, tage, n=1000, seed=42, div_pa=0):
     """
@@ -415,7 +462,7 @@ def signal(prob, rsi, sma20, sma50, macd_h):
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
-                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig, ana=None):
+                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig, ana=None, gc_info=None):
     xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
     xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
@@ -463,7 +510,14 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                         f"Diese Diskrepanz von **{differenz:.0f} Prozentpunkten** entsteht oft, wenn "
                         f"eine Aktie fundamental unterbewertet ist, der Markt den Analysten aber (noch) nicht folgt. "
                         f"Ein technischer Trendwechsel — SMA20 über SMA50 — wäre das erste Signal, "
-                        f"dass sich Kurs und Analystenmeinung annähern. Bis dahin ist Abwarten ratsam."
+                        f"dass sich Kurs und Analystenmeinung annähern. Bis dahin ist Abwarten ratsam. "
+                        + (
+                            f"Laut aktueller SMA-Berechnung würde ein Golden Cross bei einem "
+                            f"nachhaltigen Kurs von ca. **{gc_info['kurs']:.2f} EUR** "
+                            f"in etwa **{gc_info['tage']} Handelstagen** eintreten — "
+                            f"das wäre das konkrete Einstiegssignal."
+                            if gc_info else ""
+                        )
                     )
                 else:
                     trendwende = (
@@ -675,6 +729,8 @@ if start:
         gc1 = garch(df, 252, n_sim, seed=13, div_pa=dv["yield"]/100)
         kg6 = kz(gc6, preis)
         kg1 = kz(gc1, preis)
+        # Golden Cross nur bei Abwärtstrend berechnen
+        gc_info = golden_cross_prognose(df) if sma20 < sma50 else None
 
     # ── Header ────────────────────────────────────────────────────────────────
     st.subheader(meta.get("name", ticker) + " (" + ticker + ")")
@@ -879,7 +935,7 @@ if start:
         gwkt6=gwkt6, gwkt1=gwkt1,
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
-        k6=k6, k1=k1, sig=sig, ana=ana,
+        k6=k6, k1=k1, sig=sig, ana=ana, gc_info=gc_info,
     ))
 
     st.markdown("---")
