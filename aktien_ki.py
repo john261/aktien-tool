@@ -45,21 +45,11 @@ def _best_ticker(quotes):
 
 @st.cache_data(ttl=86400)
 def wkn_zu_ticker(wkn):
-    """
-    Löst eine WKN in ein Ticker-Symbol auf.
-    Strategie 1: Direkte WKN-Suche bei Yahoo Finance
-    Strategie 2: OpenFIGI API (kostenfrei, kein Key nötig)
-    Strategie 3: ISIN-Ableitung (DE000 + WKN)
-    """
     wkn = wkn.strip().upper()
-
-    # Strategie 1: Yahoo direkt
     quotes = _yahoo_search(wkn)
     ticker, name = _best_ticker(quotes)
     if ticker:
         return ticker, name
-
-    # Strategie 2: OpenFIGI
     try:
         r = requests.post(
             "https://api.openfigi.com/v3/mapping",
@@ -82,8 +72,6 @@ def wkn_zu_ticker(wkn):
                     return t2, n2 or name
     except Exception:
         pass
-
-    # Strategie 3: ISIN-Ableitung
     for isin in ["DE000" + wkn, "DE" + wkn]:
         try:
             quotes3 = _yahoo_search(isin)
@@ -92,7 +80,6 @@ def wkn_zu_ticker(wkn):
                 return t3, n3
         except Exception:
             pass
-
     return None, None
 
 # ── DATEN ─────────────────────────────────────────────────────────────────────
@@ -123,19 +110,11 @@ def lade_analysten(ticker):
     try:
         obj  = yf.Ticker(ticker)
         info = obj.info
-        # Kursziel & Empfehlung
         ziel      = info.get("targetMeanPrice")
         ziel_low  = info.get("targetLowPrice")
         ziel_high = info.get("targetHighPrice")
-        empf      = info.get("recommendationKey", "")  # buy, hold, sell, ...
+        empf      = info.get("recommendationKey", "")
         n_analyst = info.get("numberOfAnalystOpinions", 0)
-
-        # Ratings-Verteilung
-        ratings = {
-            "Starker Kauf": info.get("recommendationMean", None),
-        }
-
-        # Aktuelle Ratings-Tabelle (letzte Einträge)
         try:
             rec_df = obj.recommendations
             if rec_df is not None and not rec_df.empty:
@@ -144,7 +123,6 @@ def lade_analysten(ticker):
                 rec_df = None
         except Exception:
             rec_df = None
-
         return {
             "ziel":      ziel,
             "ziel_low":  ziel_low,
@@ -184,20 +162,13 @@ def indikatoren(df):
     df["R1"] = c.pct_change(1)
     df["R5"] = c.pct_change(5)
     df["R10"] = c.pct_change(10)
-    # Verbessertes Target: 5-Tage-Rendite > +2% (weniger Noise als 1%)
     df["Target"] = np.where(c.shift(-5) / c - 1 > 0.02, 1, 0)
-    # Feature Engineering
     df["Vola_Change"]    = df["ATR"] / (df["ATR"].rolling(20).mean() + 1e-9)
     df["Trend_Strength"] = df["SMA20"] / (df["SMA50"] + 1e-9)
     df["Mom_Accel"]      = df["R1"] - df["R5"]
-    # ── Marktregime-Features ──────────────────────────────────────────────────
-    # SMA200 für langfristigen Trendregime (Bullenmarkt vs. Bärenmarkt)
     df["SMA200"]         = c.rolling(200).mean()
     df["Regime_Trend"]   = (df["SMA50"] > df["SMA200"]).astype(int)
-    # Volatilitätsregime: ATR über 50-Tage-Schnitt = hohes Risiko-Regime
     df["Regime_Vola"]    = (df["ATR"] > df["ATR"].rolling(50).mean()).astype(int)
-    # Kombiniertes Regime: 0=Bär+hoheVola, 1=Bär+niedrigeVola,
-    #                       2=Bulle+hoheVola, 3=Bulle+niedrigeVola (optimal)
     df["Regime"]         = df["Regime_Trend"] * 2 + (1 - df["Regime_Vola"])
     return df.dropna()
 
@@ -213,26 +184,15 @@ def features(df):
 
 # ── MODELL ────────────────────────────────────────────────────────────────────
 def modell(df, lag):
-    """
-    Walk-Forward Validation mit Rolling Window (nur letzte 2 Jahre relevant).
-    Sigmoid-Kalibrierung statt Isotonic — stabiler bei begrenzten Daten.
-    Marktregime fliesst als Feature ein.
-    """
     X, y = df[lag], df["Target"]
     n = len(X)
-
-    # Rolling Window: nur letzte ~500 Handelstage (ca. 2 Jahre) trainieren
-    # Ältere Daten veralten — Märkte sind nicht stationär
     window_size = min(500, n)
     X_rolling   = X.iloc[-window_size:]
     y_rolling   = y.iloc[-window_size:]
     n_roll      = len(X_rolling)
-
-    # Walk-Forward auf dem Rolling Window
     min_train = min(200, int(n_roll * 0.6))
     step      = 20
     preds, trues = [], []
-
     for end in range(min_train, n_roll - step, step):
         X_train = X_rolling.iloc[:end]
         y_train = y_rolling.iloc[:end]
@@ -248,11 +208,7 @@ def modell(df, lag):
             trues.extend(y_test.tolist())
         except Exception:
             continue
-
     wf_acc = accuracy_score(trues, preds) if len(preds) > 10 else 0.5
-
-    # Finales Modell auf Rolling Window trainieren
-    # sigmoid: stabiler als isotonic bei ~500 Datenpunkten
     base_final = GradientBoostingClassifier(n_estimators=100, max_depth=3,
                                             learning_rate=0.05, random_state=42)
     m = CalibratedClassifierCV(base_final, cv=3, method="sigmoid")
@@ -261,7 +217,6 @@ def modell(df, lag):
     else:
         m.fit(X, y)
     prob = m.predict_proba(X_rolling.iloc[[-1]])[0][1]
-
     imp = None
     try:
         imp = dict(zip(FCOLS, m.calibrated_classifiers_[0].estimator.feature_importances_))
@@ -374,30 +329,17 @@ def kz(paths, kauf):
 # ── GOLDEN CROSS BERECHNUNG ──────────────────────────────────────────────────
 def golden_cross_prognose(df):
     """
-    Berechnet ab welchem Kursniveau und in ca. wie vielen Tagen
-    ein Golden Cross (SMA20 > SMA50) eintreten würde,
-    FALLS der Kurs auf dem berechneten Niveau konstant bleibt.
+    Berechnet bei welchem konstanten Kursniveau ein Golden Cross
+    (SMA20 > SMA50) rechnerisch eintreten würde.
     Dies ist eine Wenn-dann-Bedingung, keine Kursprognose.
     """
     closes = df["Close"].values
     sma20_last = float(df["SMA20"].iloc[-1])
     sma50_last = float(df["SMA50"].iloc[-1])
-
-    # Nur relevant wenn SMA20 < SMA50 (Abwärtstrend)
     if sma20_last >= sma50_last:
         return None
-
-    # SMA50 in 20 Tagen simulieren (annähernde Konstante, da träge)
-    # SMA50 ändert sich täglich um: (neuer_kurs - kurs_vor_50_tagen) / 50
-    recent_50 = closes[-50:]
-    oldest_in_50 = closes[-50]  # fällt morgen raus
-
-    # Wir suchen: welcher konstante Tageskurs X führt dazu dass
-    # nach n Tagen SMA20(X) > SMA50(X)?
-    # Simulation: täglich X einfügen und SMAs neu berechnen
     best_kurs  = None
     best_tage  = None
-
     for kurs_kandidat in np.arange(
         float(df["Close"].iloc[-1]) * 0.95,
         float(df["Close"].iloc[-1]) * 1.50,
@@ -405,7 +347,7 @@ def golden_cross_prognose(df):
     ):
         sim_closes = list(closes.copy())
         crossed = False
-        for tag in range(1, 61):  # max 60 Tage simulieren
+        for tag in range(1, 61):
             sim_closes.append(kurs_kandidat)
             s20 = np.mean(sim_closes[-20:])
             s50 = np.mean(sim_closes[-50:])
@@ -417,15 +359,10 @@ def golden_cross_prognose(df):
                 break
         if crossed and best_tage <= 5:
             break
-
     return {"kurs": best_kurs, "tage": best_tage, "sma20": sma20_last, "sma50": sma50_last}
 
 # ── BOOTSTRAP SIMULATION ─────────────────────────────────────────────────────
 def bootstrap(df, tage, n=1000, seed=42, div_pa=0):
-    """
-    Zieht echte historische Tagesrenditen mit Zurücklegen neu zusammen.
-    Bildet Fat Tails und Crashs realistischer ab als Normalverteilung.
-    """
     np.random.seed(seed)
     lr = np.log(df["Close"] / df["Close"].shift(1)).dropna().values
     div_daily = div_pa / 252
@@ -438,22 +375,17 @@ def bootstrap(df, tage, n=1000, seed=42, div_pa=0):
 
 # ── GARCH(1,1) SIMULATION ─────────────────────────────────────────────────────
 def garch(df, tage, n=1000, seed=42, div_pa=0):
-    """
-    GARCH(1,1): Volatilität ist zeitvariabel — nach Schocks steigt sie, in
-    ruhigen Phasen sinkt sie wieder. Realistischer als konstante Vola.
-    """
     np.random.seed(seed)
     lr   = np.log(df["Close"] / df["Close"].shift(1)).dropna().values
     mu   = float(lr.mean()) + div_pa / 252
-    # GARCH-Parameter via Momentenschätzung
     var  = float(lr.var())
     omega = var * 0.05
-    alpha = 0.10   # Gewicht letztes Schock²
-    beta  = 0.85   # Gewicht letzte Varianz
+    alpha = 0.10
+    beta  = 0.85
     S0   = float(df["Close"].iloc[-1])
     paths = np.zeros((n, tage + 1))
     paths[:, 0] = S0
-    h = np.full(n, var)   # Startvarianz für alle Pfade
+    h = np.full(n, var)
     for t in range(tage):
         eps  = np.random.standard_normal(n)
         ret  = mu - 0.5 * h + np.sqrt(h) * eps
@@ -464,7 +396,6 @@ def garch(df, tage, n=1000, seed=42, div_pa=0):
 
 # ── SIMULATIONS-VERGLEICH ─────────────────────────────────────────────────────
 def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
-    """Erstellt einen Vergleichs-Chart aller drei Simulationsmethoden."""
     methods = [
         ("Monte Carlo", mc_paths, "#4a9eff", "rgba(74,158,255,0.12)"),
         ("Bootstrap",   bs_paths, "#f0a000", "rgba(240,160,0,0.12)"),
@@ -481,16 +412,13 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
         p5  = list(np.percentile(paths, 5,  axis=0))
         p95 = list(np.percentile(paths, 95, axis=0))
         p50 = list(np.percentile(paths, 50, axis=0))
-        fig.add_trace(go.Scatter(
-            x=x_days, y=p95, showlegend=False,
-            line=dict(color="rgba(0,0,0,0)", width=0)))
-        fig.add_trace(go.Scatter(
-            x=x_days, y=p5, name=label,
-            line=dict(color="rgba(0,0,0,0)", width=0),
-            fill="tonexty", fillcolor=fill_color))
-        fig.add_trace(go.Scatter(
-            x=x_days, y=p50, name=label + " (Median)",
-            line=dict(color=color, width=2, dash="dot")))
+        fig.add_trace(go.Scatter(x=x_days, y=p95, showlegend=False,
+                                 line=dict(color="rgba(0,0,0,0)", width=0)))
+        fig.add_trace(go.Scatter(x=x_days, y=p5, name=label,
+                                 line=dict(color="rgba(0,0,0,0)", width=0),
+                                 fill="tonexty", fillcolor=fill_color))
+        fig.add_trace(go.Scatter(x=x_days, y=p50, name=label + " (Median)",
+                                 line=dict(color=color, width=2, dash="dot")))
     fig.add_hline(y=kauf, line_dash="dash", line_color="rgba(255,77,106,0.6)",
                   annotation_text="Kaufkurs")
     fig.update_layout(
@@ -503,11 +431,6 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
 
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
 def signal(prob, rsi, sma20, sma50, macd_h):
-    """
-    Timing-Signal: Bewertet NUR ob der aktuelle Moment technisch günstig ist
-    für einen Einstieg — nicht ob die Aktie langfristig gut ist.
-    Das ist Aufgabe der Simulation.
-    """
     g, s = [], 0.0
     s += (prob - 0.5) * 2 * 0.5
     g.append(f"ML: {prob*100:.1f}%")
@@ -520,8 +443,6 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     else:             s -= 0.15; g.append("SMA20 < SMA50 - Abwaertstrend")
     if macd_h > 0: s += 0.10; g.append("MACD positiv")
     else:          s -= 0.10; g.append("MACD negativ")
-
-    # Timing-Label statt KAUFEN/VERKAUFEN
     if s > 0.20:
         timing = "Günstiger Einstiegszeitpunkt"
         timing_ico = "🟢"
@@ -537,7 +458,6 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     else:
         timing = "Ungünstiger Einstiegszeitpunkt"
         timing_ico = "🔴"
-
     return timing, timing_ico, min(abs(s)/0.55, 1.0), g, s
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
@@ -550,7 +470,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
     xup1_pct   = round((k1["p95"] - preis) / preis * 100)
 
-    # sig_text basiert jetzt auf Score statt KAUFEN/VERKAUFEN
     if score is not None and score > 0.20:
         sig_text = "ist der Einstiegszeitpunkt technisch günstig"
     elif score is not None and score > 0.05:
@@ -569,12 +488,26 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     else:
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis verdient besondere Aufmerksamkeit — mehr als ein Drittel der Szenarien endet im Minus."
 
+    # ── FIX: Dynamische Verben je nach tatsächlicher Richtung ────────────────
+    # Gewinnwahrscheinlichkeit: steigt, fällt oder bleibt gleich von 6M → 1J?
+    if gwkt1 > gwkt6:
+        wkt_verb = "steigt die Gewinnwahrscheinlichkeit auf"
+    elif gwkt1 < gwkt6:
+        wkt_verb = "sinkt die Gewinnwahrscheinlichkeit auf"
+    else:
+        wkt_verb = "bleibt die Gewinnwahrscheinlichkeit stabil bei"
+
+    # Gesamtertrag: verbessert, verschlechtert oder gleich von 6M → 1J?
+    if g1tot > g6tot:
+        ertrag_verb = "verbessert sich der erwartete Gesamtertrag auf"
+    elif g1tot < g6tot:
+        ertrag_verb = "verschlechtert sich der erwartete Gesamtertrag auf"
+    else:
+        ertrag_verb = "bleibt der erwartete Gesamtertrag stabil bei"
+
     # ── Technischer Kontext ──────────────────────────────────────────────────
     tech_lines = []
-
     if rsi is not None and sma20 is not None and sma50 is not None:
-
-        # Langfristiger Trend (SMA200)
         if sma200 is not None:
             if sma50 > sma200:
                 tech_lines.append(
@@ -586,8 +519,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                     f"**SMA50 ({sma50:.2f}) < SMA200 ({sma200:.2f})** — der langfristige Trend zeigt abwärts. "
                     f"Solange SMA50 unter SMA200 bleibt, ist struktureller Gegenwind vorhanden."
                 )
-
-        # Kurzfristiger Trend (SMA20 vs SMA50)
         if sma20 < sma50:
             tech_lines.append(
                 f"**SMA20 ({sma20:.2f}) < SMA50 ({sma50:.2f})** — der kurzfristige Trend dreht bereits ab. "
@@ -597,8 +528,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             tech_lines.append(
                 f"**SMA20 ({sma20:.2f}) > SMA50 ({sma50:.2f})** — kurzfristiger Aufwärtsschub bestätigt den Trend."
             )
-
-        # RSI-Interpretation
         if rsi < 30:
             tech_lines.append(
                 f"**RSI {rsi:.1f} — massiv überverkauft.** Bei einem RSI unter 30 ist die Aktie technisch "
@@ -623,8 +552,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             tech_lines.append(
                 f"**RSI {rsi:.1f} — neutral.** Weder überkauft noch überverkauft."
             )
-
-        # MACD
         if macd_h is not None:
             if macd_h > 0:
                 tech_lines.append(f"**MACD positiv** — kurzfristiger Momentum-Schub bestätigt.")
@@ -637,16 +564,12 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
 
     # ── Gesamtbild Checkliste ────────────────────────────────────────────────
     gesamtbild_lines = []
-
-    # Simulation
     if gwkt1 >= 75:
         gesamtbild_lines.append(f"✅ **Simulation:** {gwkt1} % Gewinnwahrscheinlichkeit auf Jahressicht — stark")
     elif gwkt1 >= 60:
         gesamtbild_lines.append(f"🟡 **Simulation:** {gwkt1} % Gewinnwahrscheinlichkeit — solide")
     else:
         gesamtbild_lines.append(f"🔴 **Simulation:** nur {gwkt1} % Gewinnwahrscheinlichkeit — schwach")
-
-    # Analysten
     if ana and ana.get("ziel") and preis > 0:
         upside_ana = (ana["ziel"] - preis) / preis * 100
         if upside_ana >= 15:
@@ -657,8 +580,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟡 **Analysten:** Kurs fast am Kursziel ({ana['ziel']:.0f} EUR) — kaum Spielraum")
         else:
             gesamtbild_lines.append(f"🔴 **Analysten:** Kurs über Kursziel — Analysten sehen Rückgang")
-
-    # Dividende
     if dv and dv.get("yield", 0) > 0:
         yld = dv["yield"]
         if yld >= 3:
@@ -667,8 +588,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟡 **Dividende:** {yld:.1f} % — moderate Ausschüttung")
     else:
         gesamtbild_lines.append(f"⚪ **Dividende:** keine Ausschüttung")
-
-    # RSI
     if rsi is not None:
         if rsi < 30:
             gesamtbild_lines.append(f"✅ **RSI {rsi:.1f}** — massiv überverkauft, mögliches Einstiegsfenster")
@@ -680,8 +599,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟡 **RSI {rsi:.1f}** — leicht erhitzt, Vorsicht bei Einstieg")
         else:
             gesamtbild_lines.append(f"🔴 **RSI {rsi:.1f}** — überkauft, schlechter Einstiegszeitpunkt")
-
-    # Timing-Signal
     if score is not None:
         if score > 0.20:
             gesamtbild_lines.append(f"✅ **Timing:** Günstiger Einstiegszeitpunkt — jetzt technisch sauber")
@@ -693,8 +610,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             gesamtbild_lines.append(f"🟠 **Timing:** Eher ungünstiger Moment — kurzfristig etwas Gegenwind")
         else:
             gesamtbild_lines.append(f"🔴 **Timing:** Ungünstiger Einstiegszeitpunkt — kurzfristig schwach")
-
-    # Trend
     if sma20 is not None and sma50 is not None and sma200 is not None:
         if sma20 > sma50 and sma50 > sma200:
             gesamtbild_lines.append(f"✅ **Trend:** kurz- und langfristig aufwärts — starke Trendstruktur")
@@ -703,7 +618,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
         else:
             gesamtbild_lines.append(f"🔴 **Trend:** Langfristtrend gebrochen — struktureller Gegenwind")
 
-    # Zähle Ampeln
     green  = sum(1 for l in gesamtbild_lines if l.startswith("✅"))
     yellow = sum(1 for l in gesamtbild_lines if l.startswith("🟡"))
     red    = sum(1 for l in gesamtbild_lines if l.startswith("🔴"))
@@ -728,8 +642,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     # ── Einstiegsempfehlung ──────────────────────────────────────────────────
     empfehlung_block = ""
     if rsi is not None and sma20 is not None and sma50 is not None:
-
-        # Fall 1: Massiv überverkauft + Langfristtrend intakt → Tranchen-Einstieg
         if rsi < 30 and sma200 is not None and sma50 > sma200 and gwkt1 >= 50:
             empfehlung_block = (
                 f"\n\n**💡 Einstiegsempfehlung — Tranchen-Strategie:**\n\n"
@@ -741,8 +653,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"— **Dritte Tranche:** wenn Golden Cross eintritt (SMA20 > SMA50)\n\n"
                 f"So profitierst du vom tiefen Kurs ohne alles auf einmal zu riskieren."
             )
-
-        # Fall 2: Überverkauft aber Langfristtrend gebrochen → abwarten
         elif rsi < 30 and sma200 is not None and sma50 < sma200:
             empfehlung_block = (
                 f"\n\n**⚠️ Einstiegsempfehlung — Abwarten:**\n\n"
@@ -751,8 +661,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"allein reicht nicht als Kaufsignal. Erst wenn SMA50 wieder über SMA200 "
                 f"steigt, verbessert sich das Chance-Risiko-Verhältnis deutlich."
             )
-
-        # Fall 3: Guter Aufwärtstrend + hohe Gewinnchance → direkt einsteigen
         elif sma20 > sma50 and sma200 is not None and sma50 > sma200 and gwkt1 >= 70 and rsi < 65:
             empfehlung_block = (
                 f"\n\n**✅ Einstiegsempfehlung — Direkt einsteigen:**\n\n"
@@ -761,8 +669,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"und der RSI ({rsi:.1f}) ist noch nicht überkauft. "
                 f"Das ist ein technisch sauberes Einstiegsfenster."
             )
-
-        # Fall 4: Überkauft + hohe Gewinnwahrscheinlichkeit → auf Rücksetzer warten
         elif rsi > 70 and gwkt1 >= 65:
             empfehlung_block = (
                 f"\n\n**⏳ Einstiegsempfehlung — Auf Rücksetzer warten:**\n\n"
@@ -771,8 +677,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"Gewinnwahrscheinlichkeit), aber ein günstigerer Einstieg bei RSI 50–60 "
                 f"würde das Chance-Risiko-Verhältnis verbessern."
             )
-
-        # Fall 5: Schwache Gewinnchance + Abwärtstrend → nicht kaufen
         elif gwkt1 < 50 and sma20 < sma50:
             empfehlung_block = (
                 f"\n\n**🔴 Einstiegsempfehlung — Nicht kaufen:**\n\n"
@@ -781,8 +685,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"Der technische und statistische Kontext spricht derzeit gegen einen Einstieg. "
                 f"Beobachten und auf eine Trendwende warten."
             )
-
-        # Fall 6: Neutrales Bild → positionsgröße reduzieren
         elif 50 <= gwkt1 < 65:
             empfehlung_block = (
                 f"\n\n**🟡 Einstiegsempfehlung — Kleine Position, eng absichern:**\n\n"
@@ -796,24 +698,16 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     if ana and ana.get("ziel") and preis > 0:
         ziel    = ana["ziel"]
         upside  = (ziel - preis) / preis * 100
-        sim_ret = g1tot  # Simulation 1-Jahres-Erwartung
-
+        sim_ret = g1tot
         differenz = abs(upside - sim_ret)
-
         if differenz >= 15:
-            richtung = "deutlich optimistischer" if upside > sim_ret else "deutlich pessimistischer"
             empf_map = {
                 "strong_buy": "Starker Kauf", "buy": "Kaufen",
                 "hold": "Halten", "underperform": "Unterperformen", "sell": "Verkaufen",
             }
             empf_txt = empf_map.get(ana.get("empf", ""), "keine klare Empfehlung")
-
             if upside > sim_ret:
-                # Analysten bullisher als Simulation
                 if gwkt1 < 55:
-                    # FIX: Golden-Cross-Text als klare Wenn-dann-Bedingung formuliert,
-                    # nicht als Kursprognose. Das Tool berechnet nur, bei welchem
-                    # konstanten Kursniveau ein Golden Cross rechnerisch eintreten würde.
                     trendwende = (
                         f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
                         f"Die {ana.get('n', '')} befragten Analysten sehen ein durchschnittliches Kursziel "
@@ -841,7 +735,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                         f"die in den Kursdaten noch nicht sichtbar sind."
                     )
             else:
-                # Simulation bullisher als Analysten
                 trendwende = (
                     f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
                     f"Interessanterweise ist hier die Simulation mit **{sim_ret:+.1f} %** "
@@ -851,8 +744,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 )
             analyst_block = trendwende
 
-    # FIX: Vorzeichen bei g6tot und g1tot korrekt ausgeben — war vorher hardcoded "+",
-    # was bei negativen Werten zu "+-X%" führte. Jetzt wird das Vorzeichen dynamisch gesetzt.
+    # ── Fließtext zusammenbauen ──────────────────────────────────────────────
     return f"""
 **Gesamtfazit – {name} ({ticker})**
 
@@ -862,8 +754,8 @@ Der erwartete Gesamtertrag (Kurs + Dividende) liegt bei **{g6tot:+.1f} %**. \
 Im günstigen Fall wächst das Investment um **+{xup6_pct} %**, im schlechten Szenario \
 liegt der Extremverlust ohne Absicherung bei **–{xdown6_pct} %**.
 
-Hältst du ein volles Jahr durch, steigt die Gewinnwahrscheinlichkeit weiter auf **{gwkt1} %**. \
-Der erwartete Gesamtertrag klettert auf **{g1tot:+.1f} %**. \
+Hältst du ein volles Jahr durch, {wkt_verb} **{gwkt1} %**. \
+Damit {ertrag_verb} **{g1tot:+.1f} %**. \
 Selbst im ungünstigsten Extremfall ohne Stop-Loss wären maximal **–{xdown1_pct} %** \
 möglich — nach oben hingegen bis zu **+{xup1_pct} %**.
 
@@ -1033,17 +925,14 @@ if start:
         p1, _,  _     = monte_carlo(df, 252, n_sim, div_pa=dv["yield"]/100)
         k6 = kz(p6, preis)
         k1 = kz(p1, preis)
-        # Bootstrap
         bs6 = bootstrap(df, 126, n_sim, seed=7,  div_pa=dv["yield"]/100)
         bs1 = bootstrap(df, 252, n_sim, seed=7,  div_pa=dv["yield"]/100)
         kb6 = kz(bs6, preis)
         kb1 = kz(bs1, preis)
-        # GARCH
         gc6 = garch(df, 126, n_sim, seed=13, div_pa=dv["yield"]/100)
         gc1 = garch(df, 252, n_sim, seed=13, div_pa=dv["yield"]/100)
         kg6 = kz(gc6, preis)
         kg1 = kz(gc1, preis)
-        # Golden Cross nur bei Abwärtstrend berechnen
         gc_info = golden_cross_prognose(df) if sma20 < sma50 else None
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -1051,7 +940,6 @@ if start:
     st.caption("Sektor: " + meta.get("sector", "-"))
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    # Regime bestimmen
     regime_val  = int(df["Regime"].iloc[-1]) if "Regime" in df.columns else -1
     regime_map  = {3: "🟢 Bulle / ruhig", 2: "🟡 Bulle / volatil",
                    1: "🟠 Bär / ruhig",   0: "🔴 Bär / volatil"}
@@ -1065,9 +953,7 @@ if start:
               help="Walk-Forward Accuracy — realistischer als einfacher Split")
     c5.metric("Div.-Rendite", f"{dv['yield']:.1f}%", help=dv.get("quelle",""))
 
-    # Regime-Banner
-    regime_colors = {3:"success", 2:"warning", 1:"warning", 0:"error"}
-    regime_help   = {
+    regime_help = {
         3: "SMA50 > SMA200 (Aufwärtstrend) + Volatilität niedrig → optimale Kaufbedingungen",
         2: "SMA50 > SMA200 (Aufwärtstrend) + Volatilität erhöht → Trend intakt, aber unruhig",
         1: "SMA50 < SMA200 (Abwärtstrend) + Volatilität niedrig → Seitwärtsphase",
@@ -1125,8 +1011,6 @@ if start:
     ana = lade_analysten(ticker)
     if ana and ana.get("ziel"):
         st.subheader("🎯 Analystenbewertungen & Kursziele")
-
-        # Empfehlung leserlich machen
         empf_map = {
             "strong_buy":  ("Starker Kauf",  "🟢"),
             "buy":         ("Kaufen",         "🟢"),
@@ -1136,7 +1020,6 @@ if start:
         }
         empf_txt, empf_ico = empf_map.get(ana.get("empf",""), ("Keine Angabe", "⚪"))
         upside = ((ana["ziel"] - preis) / preis * 100) if preis > 0 else 0
-
         a1, a2, a3, a4 = st.columns(4)
         a1.metric("Konsensus", f"{empf_ico} {empf_txt}")
         a2.metric("Analysten", f"{ana['n']} Meinungen")
@@ -1144,16 +1027,12 @@ if start:
                   f"{upside:+.1f}% zum aktuellen Kurs")
         a4.metric("Kursziel-Spanne",
                   f"{ana['ziel_low']:.0f} – {ana['ziel_high']:.0f} EUR")
-
-        # Fortschrittsbalken: Kurs vs. Kursziel
         if ana.get("ziel_low") and ana.get("ziel_high"):
             spanne = ana["ziel_high"] - ana["ziel_low"]
             if spanne > 0:
                 pos_pct = max(0.0, min(1.0, (preis - ana["ziel_low"]) / spanne))
                 st.caption(f"Kursziel-Spanne: {ana['ziel_low']:.0f} EUR ◀─── aktuell: {preis:.2f} EUR ───▶ {ana['ziel_high']:.0f} EUR")
                 st.progress(pos_pct)
-
-        # Letzte Einzelratings
         if ana.get("rec_df") is not None:
             with st.expander("Letzte Einzelratings anzeigen"):
                 st.dataframe(ana["rec_df"], use_container_width=True)
@@ -1183,7 +1062,6 @@ if start:
                    f"{(k6['p75']-preis)/preis*100:+.1f}%")
         m3c.metric("Schlechtes Szenario", f"{k6['p25']:.2f}",
                    f"{(k6['p25']-preis)/preis*100:+.1f}%")
-        # FIX: Vorzeichen dynamisch — kein hardcoded "+"
         st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"{g6tot:+.1f}%", delta_color=g6col)
         st.metric(
             label=f"In {gwkt6}% der Szenarien machst du Gewinn",
@@ -1204,7 +1082,6 @@ if start:
                    f"{(k1['p75']-preis)/preis*100:+.1f}%")
         m3c.metric("Schlechtes Szenario", f"{k1['p25']:.2f}",
                    f"{(k1['p25']-preis)/preis*100:+.1f}%")
-        # FIX: Vorzeichen dynamisch — kein hardcoded "+"
         st.metric("Dein Gesamtgewinn (Kurs + Dividende)", f"{g1tot:+.1f}%", delta_color=g1col)
         st.metric(
             label=f"In {gwkt1}% der Szenarien machst du Gewinn",
@@ -1239,7 +1116,6 @@ if start:
                     gwkt_val = round(k["gwkt"]*100)
                     ret_val  = round(k["ret"] + dv["r6" if horizon_label=="6 Monate" else "r1"], 1)
                     col.metric("Gewinn-Wkt.", f"{gwkt_val} %")
-                    # FIX: Vorzeichen dynamisch — kein hardcoded "+"
                     col.metric("Erw. Ertrag", f"{ret_val:+.1f} %",
                                delta_color="normal" if ret_val >= 0 else "inverse")
                     col.metric("Median-Kurs", f"{k['p50']:.2f} EUR")
@@ -1247,7 +1123,6 @@ if start:
                                f"{(k['p5']-preis)/preis*100:+.0f}%",
                                delta_color="inverse")
 
-            # Übereinstimmungs-Hinweis
             gwkts = [round(kmc["gwkt"]*100), round(kbs["gwkt"]*100), round(kgc["gwkt"]*100)]
             spanne = max(gwkts) - min(gwkts)
             if spanne <= 5:
@@ -1257,7 +1132,6 @@ if start:
             else:
                 st.error(f"❌ Große Abweichungen (Spanne: {spanne} %) — die Aktie verhält sich unregelmäßig, Prognosen unsicher.")
 
-    # Vergleichs-Chart (1 Jahr)
     st.plotly_chart(sim_vergleich(p1, bs1, gc1, preis, preis), use_container_width=True)
 
     # ── Gesamtfazit ───────────────────────────────────────────────────────────
