@@ -501,6 +501,11 @@ def sim_vergleich(mc_paths, bs_paths, gc_paths, kauf, preis):
 
 # ── SIGNAL ────────────────────────────────────────────────────────────────────
 def signal(prob, rsi, sma20, sma50, macd_h):
+    """
+    Timing-Signal: Bewertet NUR ob der aktuelle Moment technisch günstig ist
+    für einen Einstieg — nicht ob die Aktie langfristig gut ist.
+    Das ist Aufgabe der Simulation.
+    """
     g, s = [], 0.0
     s += (prob - 0.5) * 2 * 0.5
     g.append(f"ML: {prob*100:.1f}%")
@@ -513,24 +518,47 @@ def signal(prob, rsi, sma20, sma50, macd_h):
     else:             s -= 0.15; g.append("SMA20 < SMA50 - Abwaertstrend")
     if macd_h > 0: s += 0.10; g.append("MACD positiv")
     else:          s -= 0.10; g.append("MACD negativ")
-    sig = "KAUFEN" if s > 0.15 else ("VERKAUFEN" if s < -0.15 else "HALTEN")
-    return sig, min(abs(s)/0.55, 1.0), g, s
+
+    # Timing-Label statt KAUFEN/VERKAUFEN
+    if s > 0.20:
+        timing = "Günstiger Einstiegszeitpunkt"
+        timing_ico = "🟢"
+    elif s > 0.05:
+        timing = "Eher günstiger Moment"
+        timing_ico = "🟡"
+    elif s > -0.05:
+        timing = "Neutraler Moment"
+        timing_ico = "🟡"
+    elif s > -0.20:
+        timing = "Eher ungünstiger Moment"
+        timing_ico = "🟠"
+    else:
+        timing = "Ungünstiger Einstiegszeitpunkt"
+        timing_ico = "🔴"
+
+    return timing, timing_ico, min(abs(s)/0.55, 1.0), g, s
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 g6tot, g1tot, sl, rp, rvmax, k6, k1, sig,
                 ana=None, gc_info=None,
-                rsi=None, sma20=None, sma50=None, sma200=None, macd_h=None, dv=None):
+                rsi=None, sma20=None, sma50=None, sma200=None, macd_h=None, dv=None, score=None):
     xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
     xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
     xup1_pct   = round((k1["p95"] - preis) / preis * 100)
 
-    sig_text = {
-        "KAUFEN":    "spricht das Gesamtbild klar für einen Einstieg",
-        "HALTEN":    "empfiehlt sich aktuell eine abwartende Haltung",
-        "VERKAUFEN": "deuten die Signale eher auf einen Ausstieg hin",
-    }.get(sig, "ist das Bild gemischt")
+    # sig_text basiert jetzt auf Score statt KAUFEN/VERKAUFEN
+    if score is not None and score > 0.20:
+        sig_text = "ist der Einstiegszeitpunkt technisch günstig"
+    elif score is not None and score > 0.05:
+        sig_text = "ist der Moment technisch leicht positiv"
+    elif score is not None and score < -0.20:
+        sig_text = "ist der Einstiegszeitpunkt technisch ungünstig — Abwarten kann sinnvoll sein"
+    elif score is not None and score < -0.05:
+        sig_text = "zeigt das kurzfristige Timing etwas Gegenwind"
+    else:
+        sig_text = "ist das kurzfristige Timing neutral"
 
     if gwkt1 >= 80:
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis fällt deutlich positiv aus — die Simulation zeigt ein klares Übergewicht profitabler Szenarien."
@@ -651,13 +679,18 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
         else:
             gesamtbild_lines.append(f"🔴 **RSI {rsi:.1f}** — überkauft, schlechter Einstiegszeitpunkt")
 
-    # KI-Signal
-    if sig == "KAUFEN":
-        gesamtbild_lines.append(f"✅ **KI-Signal:** KAUFEN — klares Einstiegssignal")
-    elif sig == "HALTEN":
-        gesamtbild_lines.append(f"🟡 **KI-Signal:** HALTEN — kein starkes Signal in beide Richtungen")
-    else:
-        gesamtbild_lines.append(f"🔴 **KI-Signal:** VERKAUFEN — technische Warnung")
+    # Timing-Signal
+    if score is not None:
+        if score > 0.20:
+            gesamtbild_lines.append(f"✅ **Timing:** Günstiger Einstiegszeitpunkt — jetzt technisch sauber")
+        elif score > 0.05:
+            gesamtbild_lines.append(f"🟡 **Timing:** Eher günstiger Moment — leicht positiv")
+        elif score > -0.05:
+            gesamtbild_lines.append(f"🟡 **Timing:** Neutraler Moment — kein klares Signal")
+        elif score > -0.20:
+            gesamtbild_lines.append(f"🟠 **Timing:** Eher ungünstiger Moment — kurzfristig etwas Gegenwind")
+        else:
+            gesamtbild_lines.append(f"🔴 **Timing:** Ungünstiger Einstiegszeitpunkt — kurzfristig schwach")
 
     # Trend
     if sma20 is not None and sma50 is not None and sma200 is not None:
@@ -977,8 +1010,8 @@ if start:
         bb_u   = float(df["BB_U"].iloc[-1])
         bb_l   = float(df["BB_L"].iloc[-1])
 
-        sig, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h)
-        emoji = {"KAUFEN": "🟢", "VERKAUFEN": "🔴", "HALTEN": "🟡"}[sig]
+        timing, timing_ico, konf, gruende, score = signal(prob, rsi, sma20, sma50, macd_h)
+        # timing_ico kommt direkt aus signal()
 
         sl    = preis * (1 - rp / 100)
         vpa   = preis - sl
@@ -1046,15 +1079,13 @@ if start:
     # ── Signal + Risiko ───────────────────────────────────────────────────────
     col_sig, col_ris = st.columns([3, 2])
     with col_sig:
-        st.subheader(emoji + " Signal: " + sig)
-        st.caption(f"Konfidenz {konf*100:.0f}%  |  ML {prob*100:.0f}%")
-        t = tq.get(sig, {})
-        if t and t.get("n", 0) > 5:
-            st.markdown(f"**Trefferquote:** {t['pct']:.0f}% ({t['n']} Faelle)  "
-                        f"  |  Avg. Rendite: **{t['ret']:+.1f}%**")
-        else:
-            st.info("Zu wenige Signale fuer Trefferquote.")
-        st.markdown("**Indikatoren:**")
+        st.subheader(f"⏱ Timing-Signal: {timing_ico} {timing}")
+        st.caption(
+            f"Bewertet nur den **aktuellen Einstiegszeitpunkt** — nicht die langfristige Qualität der Aktie. "
+            f"Die Investitionsentscheidung trifft die Simulation."
+        )
+        st.caption(f"Technische Stärke: {konf*100:.0f}%  |  ML-Kurzfrist: {prob*100:.0f}%")
+        st.markdown("**Technische Indikatoren (kurzfristig):**")
         for g in gruende:
             bull = any(k in g for k in ["ueberverkauft","bullisch","Aufwaerts","positiv"])
             bear = any(k in g for k in ["ueberkauft","baerisch","Abwaerts","negativ"])
@@ -1231,7 +1262,7 @@ if start:
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
         k6=k6, k1=k1, sig=sig, ana=ana, gc_info=gc_info,
-        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h, dv=dv,
+        rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_fazit, macd_h=macd_h, dv=dv, score=score,
     ))
 
     st.markdown("---")
