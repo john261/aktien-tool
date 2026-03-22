@@ -415,7 +415,7 @@ def signal(prob, rsi, sma20, sma50, macd_h):
 
 # ── GESAMTFAZIT ───────────────────────────────────────────────────────────────
 def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
-                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig):
+                g6tot, g1tot, sl, rp, rvmax, k6, k1, sig, ana=None):
     xdown6_pct = abs(round((k6["p5"] - preis) / preis * 100))
     xdown1_pct = abs(round((k1["p5"] - preis) / preis * 100))
     xup6_pct   = round((k6["p95"] - preis) / preis * 100)
@@ -433,6 +433,56 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis ist insgesamt ausgeglichen, mit einem leichten Vorteil auf der Gewinnseite."
     else:
         risiko_einschaetzung = "Das Chance-Risiko-Verhältnis verdient besondere Aufmerksamkeit — mehr als ein Drittel der Szenarien endet im Minus."
+
+    # ── Analysten-Divergenz ──────────────────────────────────────────────────
+    analyst_block = ""
+    if ana and ana.get("ziel") and preis > 0:
+        ziel    = ana["ziel"]
+        upside  = (ziel - preis) / preis * 100
+        sim_ret = g1tot  # Simulation 1-Jahres-Erwartung
+
+        differenz = abs(upside - sim_ret)
+
+        if differenz >= 20:
+            richtung = "deutlich optimistischer" if upside > sim_ret else "deutlich pessimistischer"
+            empf_map = {
+                "strong_buy": "Starker Kauf", "buy": "Kaufen",
+                "hold": "Halten", "underperform": "Unterperformen", "sell": "Verkaufen",
+            }
+            empf_txt = empf_map.get(ana.get("empf", ""), "keine klare Empfehlung")
+
+            if upside > sim_ret:
+                # Analysten bullisher als Simulation
+                if gwkt1 < 55:
+                    trendwende = (
+                        f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
+                        f"Die {ana.get('n', '')} befragten Analysten sehen ein durchschnittliches Kursziel "
+                        f"von **{ziel:.0f} EUR (+{upside:.0f} %)** und empfehlen **{empf_txt}** — "
+                        f"die Simulation hingegen zeigt nur **{sim_ret:+.1f} %** Gesamtertrag bei "
+                        f"lediglich **{gwkt1} % Gewinnwahrscheinlichkeit**. "
+                        f"Diese Diskrepanz von **{differenz:.0f} Prozentpunkten** entsteht oft, wenn "
+                        f"eine Aktie fundamental unterbewertet ist, der Markt den Analysten aber (noch) nicht folgt. "
+                        f"Ein technischer Trendwechsel — SMA20 über SMA50 — wäre das erste Signal, "
+                        f"dass sich Kurs und Analystenmeinung annähern. Bis dahin ist Abwarten ratsam."
+                    )
+                else:
+                    trendwende = (
+                        f"\n\n**ℹ️ Hinweis — Analysten vs. Simulation:** "
+                        f"Die Analysten sehen mit **{ziel:.0f} EUR** noch deutlich mehr Potenzial "
+                        f"als die historische Simulation ({sim_ret:+.1f} %). "
+                        f"Das kann bedeuten, dass fundamentale Katalysatoren bevorstehen, "
+                        f"die in den Kursdaten noch nicht sichtbar sind."
+                    )
+            else:
+                # Simulation bullisher als Analysten
+                trendwende = (
+                    f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
+                    f"Interessanterweise ist hier die Simulation mit **{sim_ret:+.1f} %** "
+                    f"optimistischer als das Analysten-Kursziel von **{ziel:.0f} EUR ({upside:+.0f} %)**. "
+                    f"Das deutet auf eine Aktie hin, die historisch stark gelaufen ist — "
+                    f"Analysten sehen möglicherweise weniger Spielraum nach oben als die reine Trendfortschreibung."
+                )
+            analyst_block = trendwende
 
     return f"""
 **Gesamtfazit – {name} ({ticker})**
@@ -825,7 +875,7 @@ if start:
         gwkt6=gwkt6, gwkt1=gwkt1,
         g6tot=g6tot, g1tot=g1tot,
         sl=sl, rp=rp, rvmax=rvmax,
-        k6=k6, k1=k1, sig=sig,
+        k6=k6, k1=k1, sig=sig, ana=ana,
     ))
 
     st.markdown("---")
