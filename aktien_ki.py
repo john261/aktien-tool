@@ -9,6 +9,13 @@ from sklearn.metrics import accuracy_score
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+import io
 
 st.set_page_config(page_title="KI-Aktien-Terminal Pro", page_icon="📈", layout="wide")
 
@@ -20,17 +27,19 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 def _yahoo_search(query):
     for host in ["query1", "query2"]:
-        try:
-            url = (
-                f"https://{host}.finance.yahoo.com/v1/finance/search"
-                f"?q={query}&lang=de-DE&region=DE&quotesCount=8&newsCount=0"
-            )
-            r = requests.get(url, timeout=5, headers=HEADERS)
-            quotes = r.json().get("quotes", [])
-            if quotes:
-                return quotes
-        except Exception:
-            continue
+        for attempt in range(2):
+            try:
+                url = (
+                    f"https://{host}.finance.yahoo.com/v1/finance/search"
+                    f"?q={query}&lang=de-DE&region=DE&quotesCount=8&newsCount=0"
+                )
+                r = requests.get(url, timeout=8, headers=HEADERS)
+                r.raise_for_status()
+                quotes = r.json().get("quotes", [])
+                if quotes:
+                    return quotes
+            except Exception:
+                continue
     return []
 
 def _best_ticker(quotes):
@@ -72,7 +81,7 @@ def wkn_zu_ticker(wkn):
                     return t2, n2 or name
     except Exception:
         pass
-    for isin in ["DE000" + wkn, "DE" + wkn]:
+    for isin in [f"DE000{wkn}0", f"DE000{wkn}", f"DE{wkn}"]:
         try:
             quotes3 = _yahoo_search(isin)
             t3, n3  = _best_ticker(quotes3)
@@ -269,7 +278,7 @@ def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
             "r6": g6 / (preis * n_aktien) * 100 if preis > 0 and n_aktien > 0 else 0,
             "r1": yld, "z6": z6, "z1": z1,
             "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv,"-"),
-            "next": naechste_str, "quelle": "⚠️ Manuell eingegeben",
+            "next": naechste_str, "quelle": "Manuell eingegeben",
         }
     if divs is not None and not divs.empty:
         recent = divs[divs.index >= heute - pd.DateOffset(years=1)]
@@ -294,13 +303,13 @@ def div_info(divs, preis, n_aktien, meta_yield, manuell_div=0.0):
             "r1": dpz * z1 / preis * 100 if preis > 0 else 0,
             "z6": z6, "z1": z1,
             "iv": {1:"monatlich",3:"quartalsweise",6:"halbjährlich",12:"jährlich"}.get(iv,"-"),
-            "next": naechste.strftime("%d.%m.%Y"), "quelle": "📡 yfinance (kann veraltet sein)",
+            "next": naechste.strftime("%d.%m.%Y"), "quelle": "yfinance (kann veraltet sein)",
         }
     yld = meta_yield * 100
     pa  = preis * meta_yield
     return {"yield": yld, "pa": pa, "g6": 0, "g1": pa * n_aktien,
             "r6": 0, "r1": yld, "z6": 0, "z1": 1 if yld > 0 else 0,
-            "iv": "jährlich", "next": "unbekannt", "quelle": "📡 yfinance (kann veraltet sein)"}
+            "iv": "jährlich", "next": "unbekannt", "quelle": "yfinance (kann veraltet sein)"}
 
 # ── MONTE CARLO ───────────────────────────────────────────────────────────────
 def monte_carlo(df, tage, n=1000, seed=42, div_pa=0):
@@ -528,11 +537,8 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     else:
         ertrag_verb = "bleibt der erwartete Gesamtertrag stabil bei"
 
-    # ── Timing-Flag für konsistente Sprache überall ──────────────────────────
-    # True = Gesamttiming positiv, False = negativ/neutral
     timing_positiv = score is not None and score > 0.05
 
-    # ── Technischer Kontext ──────────────────────────────────────────────────
     tech_lines = []
     if rsi is not None and sma20 is not None and sma50 is not None:
         if sma200 is not None:
@@ -556,7 +562,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"**SMA20 ({sma20:.2f}) > SMA50 ({sma50:.2f})** — kurzfristiger Aufwärtsschub bestätigt den Trend."
             )
 
-        # ▶▶ RSI-Text passt sich dem Gesamt-Timing an — keine widersprüchlichen Aussagen mehr
         if rsi < 30:
             tech_lines.append(
                 f"**RSI {rsi:.1f} — massiv überverkauft.** Bei einem RSI unter 30 ist die Aktie technisch "
@@ -573,7 +578,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                         f"klassisches Pullback-Kaufsignal."
                     )
                 else:
-                    # Timing insgesamt schlecht → RSI positiv nennen, aber Gesamtbild nicht übertreiben
                     tech_lines.append(
                         f"**RSI {rsi:.1f} — Pullback im Aufwärtstrend (ein positiver Faktor).** "
                         f"Der langfristige Trend stützt und der RSI hat sich abgekühlt — das spricht "
@@ -609,7 +613,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     if tech_lines:
         tech_block = "\n\n**Technische Einschätzung:**\n\n" + "\n\n".join(f"— {l}" for l in tech_lines)
 
-    # ── Gesamtbild Checkliste ────────────────────────────────────────────────
     gesamtbild_lines = []
 
     if gwkt1 >= 75:
@@ -639,19 +642,16 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
     else:
         gesamtbild_lines.append(f"⚪ **Dividende:** keine Ausschüttung")
 
-    # ▶▶ RSI-Zeile im Gesamtbild: konsistent mit Timing-Score
     if rsi is not None:
         if rsi < 30:
             gesamtbild_lines.append(f"✅ **RSI {rsi:.1f}** — massiv überverkauft, mögliches Einstiegsfenster")
         elif rsi < 45:
             if sma200 is not None and sma50 is not None and sma50 > sma200:
                 if timing_positiv:
-                    # Timing gut → stark positives Label
                     gesamtbild_lines.append(
                         f"✅ **RSI {rsi:.1f}** — Pullback im intakten Aufwärtstrend, attraktives Einstiegsfenster"
                     )
                 else:
-                    # Timing schlecht → abgeschwächt, kein "attraktives Einstiegsfenster"
                     gesamtbild_lines.append(
                         f"🟡 **RSI {rsi:.1f}** — Pullback im Aufwärtstrend (positiver Faktor, Timing aber noch schwach)"
                     )
@@ -707,7 +707,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
         + f"\n\n{fazit_ampel}"
     )
 
-    # ── Einstiegsempfehlung ──────────────────────────────────────────────────
     empfehlung_block = ""
     if rsi is not None and sma20 is not None and sma50 is not None:
         if rsi < 30 and sma200 is not None and sma50 > sma200 and gwkt1 >= 50:
@@ -723,7 +722,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             )
         elif rsi < 30 and sma200 is not None and sma50 < sma200:
             empfehlung_block = (
-                f"\n\n**⚠️ Einstiegsempfehlung — Abwarten:**\n\n"
+                f"\n\n**Einstiegsempfehlung — Abwarten:**\n\n"
                 f"Trotz RSI {rsi:.1f} (überverkauft) ist der langfristige Trend gebrochen "
                 f"(SMA50 unter SMA200). Das bedeutet strukturelle Schwäche — ein tiefer RSI "
                 f"allein reicht nicht als Kaufsignal. Erst wenn SMA50 wieder über SMA200 "
@@ -731,7 +730,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             )
         elif rsi < 45 and sma200 is not None and sma50 > sma200 and gwkt1 >= 65:
             if timing_positiv:
-                # Timing gut → voller Pullback-Einstieg
                 empfehlung_block = (
                     f"\n\n**💡 Einstiegsempfehlung — Pullback-Einstieg:**\n\n"
                     f"RSI {rsi:.1f} signalisiert einen Rücksetzer im intakten Aufwärtstrend — "
@@ -742,7 +740,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                     f"— **Gewinnziel:** Rückkehr zum SMA50 ({sma50:.2f} EUR) als erste Orientierung"
                 )
             else:
-                # RSI positiv, aber Timing schwach → halbe Position, konsistent mit Timing-Signal
                 empfehlung_block = (
                     f"\n\n**🟡 Einstiegsempfehlung — Kleine Einstiegsposition, auf Bestätigung warten:**\n\n"
                     f"Der RSI {rsi:.1f} zeigt einen Pullback im intakten Aufwärtstrend — "
@@ -762,7 +759,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             )
         elif rsi > 70 and gwkt1 >= 65:
             empfehlung_block = (
-                f"\n\n**⏳ Einstiegsempfehlung — Auf Rücksetzer warten:**\n\n"
+                f"\n\n**Einstiegsempfehlung — Auf Rücksetzer warten:**\n\n"
                 f"Die Aktie ist mit RSI {rsi:.1f} kurzfristig überkauft — ein Rücksetzer "
                 f"wäre technisch normal. Die langfristigen Aussichten sind gut ({gwkt1} % "
                 f"Gewinnwahrscheinlichkeit), aber ein günstigerer Einstieg bei RSI 50–60 "
@@ -784,7 +781,6 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                 f"empfiehlt sich eine halbe Positionsgröße mit engem Stop-Loss bei –{rp} %."
             )
 
-    # ── Analysten-Divergenz ──────────────────────────────────────────────────
     analyst_block = ""
     if ana and ana.get("ziel") and preis > 0:
         ziel    = ana["ziel"]
@@ -800,7 +796,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
             if upside > sim_ret:
                 if gwkt1 < 55:
                     trendwende = (
-                        f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
+                        f"\n\n**Hinweis — Analysten vs. Simulation:** "
                         f"Die {ana.get('n', '')} befragten Analysten sehen ein durchschnittliches Kursziel "
                         f"von **{ziel:.0f} EUR ({upside:+.0f} %)** und empfehlen **{empf_txt}** — "
                         f"die Simulation hingegen zeigt nur **{sim_ret:+.1f} %** Gesamtertrag bei "
@@ -827,7 +823,7 @@ def gesamtfazit(name, ticker, preis, inv, nakt, gwkt6, gwkt1,
                     )
             else:
                 trendwende = (
-                    f"\n\n**⚠️ Hinweis — Analysten vs. Simulation:** "
+                    f"\n\n**Hinweis — Analysten vs. Simulation:** "
                     f"Interessanterweise ist hier die Simulation mit **{sim_ret:+.1f} %** "
                     f"optimistischer als das Analysten-Kursziel von **{ziel:.0f} EUR ({upside:+.0f} %)**. "
                     f"Das deutet auf eine Aktie hin, die historisch stark gelaufen ist — "
@@ -855,6 +851,322 @@ ist dein maximaler Verlust auf **{rvmax:,.0f} EUR** begrenzt — unabhängig dav
 **Fazit:** Bei {name} {sig_text}. {risiko_einschaetzung} \
 Solange der Stop-Loss konsequent sitzt, bleibt das Risiko kalkulierbar.{gesamtbild_block}{tech_block}{empfehlung_block}{analyst_block}
 """.strip()
+
+# ── PDF REPORT ────────────────────────────────────────────────────────────────
+def generate_pdf_report(
+    name, ticker, preis, sektor,
+    gwkt6, gwkt1, g6tot, g1tot,
+    sl, rp, rvmax, nakt, inv,
+    k6, k1, dv, ana, score, timing,
+    rsi, sma20, sma50, sma200,
+    mu, sigma, acc, prob
+):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        leftMargin=18*mm, rightMargin=18*mm,
+        topMargin=14*mm, bottomMargin=14*mm
+    )
+
+    # ── Farben ────────────────────────────────────────────────────────────────
+    DUNKEL     = colors.HexColor("#0d0f14")
+    BLAU       = colors.HexColor("#4a9eff")
+    GRUEN      = colors.HexColor("#00c87a")
+    ROT        = colors.HexColor("#ff4d6a")
+    HELLGRAU   = colors.HexColor("#c8cdd8")
+    MITTELGRAU = colors.HexColor("#6b7280")
+    WEISS      = colors.white
+
+    # ── Styles ────────────────────────────────────────────────────────────────
+    base = getSampleStyleSheet()
+
+    def mstyle(name_s, parent="Normal", **kw):
+        return ParagraphStyle(name_s, parent=base[parent], **kw)
+
+    S_TITLE   = mstyle("Title2",   fontSize=22, textColor=WEISS,      leading=28, fontName="Helvetica-Bold")
+    S_SECTION = mstyle("Section",  fontSize=10, textColor=BLAU,       leading=13, fontName="Helvetica-Bold")
+    S_BODY    = mstyle("Body2",    fontSize=9,  textColor=HELLGRAU,   leading=13)
+    S_BOLD    = mstyle("Bold2",    fontSize=9,  textColor=WEISS,      leading=13, fontName="Helvetica-Bold")
+    S_SMALL   = mstyle("Small2",   fontSize=7.5,textColor=MITTELGRAU, leading=11)
+    S_WARN    = mstyle("Warn2",    fontSize=7.5,textColor=MITTELGRAU, leading=11, alignment=TA_CENTER)
+
+    story = []
+
+    # ── HEADER ────────────────────────────────────────────────────────────────
+    header_data = [[
+        Paragraph(f"<b>{name}</b>", S_TITLE),
+        Paragraph(
+            f"<font color='#6b7280'>{ticker} &middot; {sektor}</font><br/>"
+            f"<font color='#6b7280'>Kurs: </font><b><font color='#ffffff'>{preis:.2f} EUR</font></b>  "
+            f"<font color='#6b7280'>| Analyse: </font><font color='#c8cdd8'>"
+            f"{pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')}</font>",
+            S_BODY
+        )
+    ]]
+    header_tbl = Table(header_data, colWidths=["60%", "40%"])
+    header_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0),(-1,-1), DUNKEL),
+        ("TOPPADDING",   (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 8),
+        ("LEFTPADDING",  (0,0),(-1,-1), 0),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    story.append(header_tbl)
+    story.append(HRFlowable(width="100%", thickness=1.5, color=BLAU, spaceAfter=8))
+
+    # ── KERN-KENNZAHLEN ───────────────────────────────────────────────────────
+    gwkt_color = "#00c87a" if gwkt1 >= 65 else ("#f0a000" if gwkt1 >= 50 else "#ff4d6a")
+    ret_color  = "#00c87a" if g1tot >= 0 else "#ff4d6a"
+
+    kern_data = [[
+        Paragraph(
+            f"<font color='{gwkt_color}'><b>{gwkt1} %</b></font><br/>"
+            f"<font color='#6b7280' size='8'>Gewinn-<br/>wahrscheinlichkeit</font><br/>"
+            f"<font color='#6b7280' size='7'>auf Jahressicht</font>",
+            ParagraphStyle("KernA", fontSize=26, textColor=colors.HexColor(gwkt_color),
+                           fontName="Helvetica-Bold", alignment=TA_CENTER, leading=30)
+        ),
+        Paragraph(
+            f"<font color='{ret_color}'><b>{g1tot:+.1f} %</b></font><br/>"
+            f"<font color='#6b7280' size='8'>Erwarteter<br/>Gesamtertrag</font><br/>"
+            f"<font color='#6b7280' size='7'>Kurs + Dividende (1 J)</font>",
+            ParagraphStyle("KernB", fontSize=26, textColor=colors.HexColor(ret_color),
+                           fontName="Helvetica-Bold", alignment=TA_CENTER, leading=30)
+        ),
+        Paragraph(
+            f"<b><font color='#ff4d6a'>{sl:.2f} EUR</font></b><br/>"
+            f"<font color='#6b7280' size='8'>Stop-Loss<br/>(-{rp} %)</font><br/>"
+            f"<font color='#6b7280' size='7'>Max. Verlust: {rvmax:.0f} EUR</font>",
+            ParagraphStyle("KernC", fontSize=26, textColor=ROT,
+                           fontName="Helvetica-Bold", alignment=TA_CENTER, leading=30)
+        ),
+    ]]
+    kern_tbl = Table(kern_data, colWidths=["33%","34%","33%"])
+    kern_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0),(-1,-1), colors.HexColor("#12151e")),
+        ("BOX",          (0,0),(-1,-1), 0.8, BLAU),
+        ("INNERGRID",    (0,0),(-1,-1), 0.4, colors.HexColor("#1e2230")),
+        ("TOPPADDING",   (0,0),(-1,-1), 10),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 10),
+        ("ALIGN",        (0,0),(-1,-1), "CENTER"),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    story.append(kern_tbl)
+    story.append(Spacer(1, 7))
+
+    # ── FAZIT-TEXT ─────────────────────────────────────────────────────────────
+    if score is not None and score > 0.20:
+        timing_txt = "ist der Einstiegszeitpunkt technisch <b>guenstig</b>"
+    elif score is not None and score > 0.05:
+        timing_txt = "ist der Einstiegszeitpunkt <b>leicht positiv</b>"
+    elif score is not None and score < -0.20:
+        timing_txt = "ist der Einstiegszeitpunkt <b>technisch unguenstig</b> — Abwarten kann sinnvoll sein"
+    else:
+        timing_txt = "ist das kurzfristige Timing <b>neutral</b>"
+
+    if gwkt1 >= 75 and g1tot >= 15:
+        crv_txt = ("Das Chancen-Risiko-Verhaeltnis ist hier <b>ausserst attraktiv</b> — "
+                   "die grosse Mehrheit der Simulationsszenarien endet im Plus.")
+    elif gwkt1 >= 65:
+        crv_txt = "Das Chancen-Risiko-Verhaeltnis ist <b>solide</b> mit einem klaren Uebergewicht profitabler Szenarien."
+    else:
+        crv_txt = "Das Chancen-Risiko-Verhaeltnis verdient <b>besondere Aufmerksamkeit</b> — mehr Szenarien als gewoehnlich enden im Minus."
+
+    fazit_satz = (
+        f"Wer heute <b>{nakt} Aktien</b> zu je <b>{preis:.2f} EUR</b> ({inv:,.0f} EUR gesamt) kauft, "
+        f"macht laut Monte-Carlo-Simulation mit <b>{gwkt1} % Wahrscheinlichkeit</b> "
+        f"ueber <b>Jahressicht einen Gewinn von {g1tot:+.1f} %</b>. "
+        f"Auf Sechsmonatssicht liegt die Gewinnwahrscheinlichkeit bei <b>{gwkt6} %</b> "
+        f"mit einem erwarteten Ertrag von <b>{g6tot:+.1f} %</b>. "
+        f"Bei {name} {timing_txt}. {crv_txt} "
+        f"<b>Mit Stop-Loss bei {sl:.2f} EUR (-{rp} %) ist dein maximaler Verlust "
+        f"auf {rvmax:,.0f} EUR begrenzt</b> — unabhaengig davon, was der Markt macht."
+    )
+    story.append(Paragraph(fazit_satz, S_BODY))
+    story.append(Spacer(1, 8))
+
+    # ── PROGNOSE-TABELLE 6M / 1J ──────────────────────────────────────────────
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#1e2230"), spaceAfter=5))
+    story.append(Paragraph("Monte-Carlo-Prognose", S_SECTION))
+    story.append(Spacer(1, 3))
+
+    def kz_zeile(label, wert, farbe=None):
+        f = farbe or "#c8cdd8"
+        return [
+            Paragraph(label, S_SMALL),
+            Paragraph(f"<font color='{f}'><b>{wert}</b></font>", S_SMALL)
+        ]
+
+    def ret_farbe(v): return "#00c87a" if v >= 0 else "#ff4d6a"
+
+    prog_data = [
+        [Paragraph("<b>6 Monate</b>", S_BOLD), Paragraph("<b>1 Jahr</b>", S_BOLD)],
+        [
+            Table([
+                kz_zeile("Median-Kurs",          f"{k6['p50']:.2f} EUR"),
+                kz_zeile("Kursgewinn (Median)",   f"{k6['ret']:+.1f}%",  ret_farbe(k6['ret'])),
+                kz_zeile("Gesamtertrag (+ Div.)", f"{g6tot:+.1f}%",      ret_farbe(g6tot)),
+                kz_zeile("Gewinn-Wkt.",           f"{gwkt6} %",          "#00c87a" if gwkt6>=65 else "#f0a000"),
+                kz_zeile("Guenstiges Szenario",   f"{k6['p75']:.2f} EUR ({(k6['p75']-preis)/preis*100:+.1f}%)"),
+                kz_zeile("Schlechtes Szenario",   f"{k6['p25']:.2f} EUR ({(k6['p25']-preis)/preis*100:+.1f}%)"),
+                kz_zeile("Extremfall unten (5%)", f"{k6['p5']:.2f} EUR ({(k6['p5']-preis)/preis*100:+.0f}%)", "#ff4d6a"),
+                kz_zeile("Extremfall oben (95%)", f"{k6['p95']:.2f} EUR ({(k6['p95']-preis)/preis*100:+.0f}%)", "#00c87a"),
+            ], colWidths=["55%","45%"]),
+            Table([
+                kz_zeile("Median-Kurs",          f"{k1['p50']:.2f} EUR"),
+                kz_zeile("Kursgewinn (Median)",   f"{k1['ret']:+.1f}%",  ret_farbe(k1['ret'])),
+                kz_zeile("Gesamtertrag (+ Div.)", f"{g1tot:+.1f}%",      ret_farbe(g1tot)),
+                kz_zeile("Gewinn-Wkt.",           f"{gwkt1} %",          "#00c87a" if gwkt1>=65 else "#f0a000"),
+                kz_zeile("Guenstiges Szenario",   f"{k1['p75']:.2f} EUR ({(k1['p75']-preis)/preis*100:+.1f}%)"),
+                kz_zeile("Schlechtes Szenario",   f"{k1['p25']:.2f} EUR ({(k1['p25']-preis)/preis*100:+.1f}%)"),
+                kz_zeile("Extremfall unten (5%)", f"{k1['p5']:.2f} EUR ({(k1['p5']-preis)/preis*100:+.0f}%)", "#ff4d6a"),
+                kz_zeile("Extremfall oben (95%)", f"{k1['p95']:.2f} EUR ({(k1['p95']-preis)/preis*100:+.0f}%)", "#00c87a"),
+            ], colWidths=["55%","45%"]),
+        ]
+    ]
+    prog_tbl = Table(prog_data, colWidths=["50%","50%"])
+    prog_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0),(-1,-1), colors.HexColor("#12151e")),
+        ("BOX",          (0,0),(-1,-1), 0.5, colors.HexColor("#1e2230")),
+        ("INNERGRID",    (0,0),(-1,-1), 0.3, colors.HexColor("#1a1d28")),
+        ("TOPPADDING",   (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+        ("LEFTPADDING",  (0,0),(-1,-1), 7),
+        ("VALIGN",       (0,0),(-1,-1), "TOP"),
+    ]))
+    story.append(prog_tbl)
+    story.append(Spacer(1, 8))
+
+    # ── TECHNISCHE INDIKATOREN ────────────────────────────────────────────────
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#1e2230"), spaceAfter=5))
+    story.append(Paragraph("Technische Indikatoren", S_SECTION))
+    story.append(Spacer(1, 3))
+
+    def ampel_dot(gut, mittel):
+        if gut:    return "<font color='#00c87a'>&#9679;</font>"
+        if mittel: return "<font color='#f0a000'>&#9679;</font>"
+        return "<font color='#ff4d6a'>&#9679;</font>"
+
+    sma_txt  = f"SMA20 {sma20:.2f} {'>' if sma20 > sma50 else '<'} SMA50 {sma50:.2f}"
+    s200_txt = (f"SMA50 {sma50:.2f} {'>' if sma200 and sma50 > sma200 else '<'} SMA200 {sma200:.2f}"
+                if sma200 else "SMA200 nicht verfuegbar")
+
+    tech_data = [
+        [Paragraph("Indikator", S_SMALL), Paragraph("Wert", S_SMALL), Paragraph("Signal", S_SMALL)],
+        [Paragraph(f"{ampel_dot(rsi < 30 or 30 <= rsi <= 60, rsi <= 70)} RSI", S_SMALL),
+         Paragraph(f"{rsi:.1f}", S_SMALL),
+         Paragraph("Ueberverkauft" if rsi < 30 else ("Neutral" if rsi < 70 else "Ueberkauft"), S_SMALL)],
+        [Paragraph(f"{ampel_dot(sma20 > sma50, False)} Trend (SMA)", S_SMALL),
+         Paragraph(sma_txt, S_SMALL),
+         Paragraph("Aufwaerts" if sma20 > sma50 else "Abwaerts", S_SMALL)],
+        [Paragraph(f"{ampel_dot(bool(sma200 and sma50 > sma200), False)} Langfristtrend", S_SMALL),
+         Paragraph(s200_txt, S_SMALL),
+         Paragraph(("Intakt" if sma200 and sma50 > sma200 else "Gebrochen") if sma200 else "-", S_SMALL)],
+        [Paragraph(f"{ampel_dot(score is not None and score > 0.20, score is not None and score > -0.05)} Timing-Score", S_SMALL),
+         Paragraph(f"{score:+.2f}" if score is not None else "-", S_SMALL),
+         Paragraph(timing, S_SMALL)],
+        [Paragraph("KI-Modell (ML)", S_SMALL),
+         Paragraph(f"{prob*100:.0f}% bull. | Acc. {acc*100:.0f}%", S_SMALL),
+         Paragraph("Kurzfrist-Signal", S_SMALL)],
+    ]
+    tech_tbl = Table(tech_data, colWidths=["28%","42%","30%"])
+    tech_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0),  colors.HexColor("#1a1d28")),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.HexColor("#12151e"), colors.HexColor("#0f1118")]),
+        ("TEXTCOLOR",     (0,0),(-1,0),  BLAU),
+        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+        ("BOX",           (0,0),(-1,-1), 0.5, colors.HexColor("#1e2230")),
+        ("INNERGRID",     (0,0),(-1,-1), 0.3, colors.HexColor("#1a1d28")),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 6),
+    ]))
+    story.append(tech_tbl)
+    story.append(Spacer(1, 8))
+
+    # ── RISIKO + DIVIDENDE ────────────────────────────────────────────────────
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#1e2230"), spaceAfter=5))
+
+    risiko_inner = Table([
+        kz_zeile("Investition",   f"{inv:,.0f} EUR"),
+        kz_zeile("Anzahl Aktien", f"{nakt} Stk"),
+        kz_zeile("Kaufkurs",      f"{preis:.2f} EUR"),
+        kz_zeile("Stop-Loss",     f"{sl:.2f} EUR (-{rp} %)", "#ff4d6a"),
+        kz_zeile("Max. Verlust",  f"{rvmax:,.0f} EUR",       "#ff4d6a"),
+    ], colWidths=["55%","45%"])
+
+    risiko_block = Table([
+        [Paragraph("Risiko-Plan", S_SECTION)],
+        [risiko_inner],
+    ])
+
+    if dv and dv.get("yield", 0) > 0:
+        div_inner = Table([
+            kz_zeile("Rendite p.a.",    f"{dv['yield']:.1f}%", "#00c87a"),
+            kz_zeile("Pro Aktie",       f"{dv['pa']:.2f} EUR"),
+            kz_zeile("Deine Div. 6M",  f"{dv['g6']:.0f} EUR"),
+            kz_zeile("Deine Div. 1J",  f"{dv['g1']:.0f} EUR"),
+            kz_zeile("Rhythmus",        dv.get("iv", "-")),
+            kz_zeile("Naechste Zahlung",dv.get("next", "-")),
+        ], colWidths=["55%","45%"])
+        div_block = Table([
+            [Paragraph("Dividende", S_SECTION)],
+            [div_inner],
+        ])
+    else:
+        div_block = Table([
+            [Paragraph("Dividende", S_SECTION)],
+            [Paragraph("Keine Dividende", S_SMALL)],
+        ])
+
+    zwei_spalten = Table([[risiko_block, div_block]], colWidths=["50%","50%"])
+    zwei_spalten.setStyle(TableStyle([
+        ("VALIGN",      (0,0),(-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0),(-1,-1), 0),
+        ("RIGHTPADDING",(0,0),(-1,-1), 5),
+    ]))
+    story.append(zwei_spalten)
+    story.append(Spacer(1, 8))
+
+    # ── ANALYSTEN ─────────────────────────────────────────────────────────────
+    if ana and ana.get("ziel") and preis > 0:
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#1e2230"), spaceAfter=5))
+        story.append(Paragraph("Analysten-Konsensus", S_SECTION))
+        story.append(Spacer(1, 3))
+        upside_ana = (ana["ziel"] - preis) / preis * 100
+        empf_map = {"strong_buy":"Starker Kauf","buy":"Kaufen","hold":"Halten",
+                    "underperform":"Unterperformen","sell":"Verkaufen"}
+        empf_txt = empf_map.get(ana.get("empf",""), "-")
+        ana_tbl = Table([
+            kz_zeile("Konsensus",       empf_txt),
+            kz_zeile("Analysten",       f"{ana.get('n','-')} Meinungen"),
+            kz_zeile("Kursziel (Avg.)", f"{ana['ziel']:.2f} EUR ({upside_ana:+.1f}% Upside)",
+                     "#00c87a" if upside_ana > 0 else "#ff4d6a"),
+            kz_zeile("Spanne",          f"{ana.get('ziel_low',0):.0f} - {ana.get('ziel_high',0):.0f} EUR"),
+        ], colWidths=["40%","60%"])
+        ana_tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1), colors.HexColor("#12151e")),
+            ("TOPPADDING",   (0,0),(-1,-1), 3),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+            ("LEFTPADDING",  (0,0),(-1,-1), 6),
+            ("BOX",          (0,0),(-1,-1), 0.5, colors.HexColor("#1e2230")),
+        ]))
+        story.append(ana_tbl)
+        story.append(Spacer(1, 6))
+
+    # ── FOOTER ────────────────────────────────────────────────────────────────
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#1e2230"), spaceBefore=4))
+    story.append(Paragraph(
+        "Nur fuer Bildungszwecke — keine Finanzberatung. "
+        "Monte-Carlo-Simulationen basieren auf historischen Kursdaten und sind keine Garantie fuer "
+        "zukuenftige Renditen. Vergangene Performance ist kein verlasslicher Indikator fuer die Zukunft. "
+        "Erstellt mit KI-Aktien-Terminal Pro.",
+        S_WARN
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
 def chart_prognose(df, p6, p1, kauf, ticker):
@@ -902,9 +1214,9 @@ def chart_tech(df, ticker):
                              name="RSI", line=dict(color="#c084fc", width=1.5)), row=2, col=1)
     fig.add_hline(y=70, line_dash="dot", line_color="rgba(255,100,100,0.4)", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="rgba(100,200,100,0.4)", row=2, col=1)
-    colors = ["#00c87a" if v >= 0 else "#ff4d6a" for v in df["MACD_H"]]
+    bar_colors = ["#00c87a" if v >= 0 else "#ff4d6a" for v in df["MACD_H"]]
     fig.add_trace(go.Bar(x=list(df.index), y=list(df["MACD_H"]),
-                         name="MACD Hist", marker_color=colors), row=3, col=1)
+                         name="MACD Hist", marker_color=bar_colors), row=3, col=1)
     fig.add_trace(go.Scatter(x=list(df.index), y=list(df["MACD"]),
                              name="MACD", line=dict(color="#f0a000", width=1.2)), row=3, col=1)
     fig.update_layout(template="plotly_dark", height=560,
@@ -926,6 +1238,12 @@ wkn_input = st.sidebar.text_input(
     placeholder="z.B. 843002",
     max_chars=6,
     help="6-stellige Wertpapierkennnummer, z.B. 843002 für Munich Re"
+).strip().upper()
+
+ticker_override = st.sidebar.text_input(
+    "Ticker manuell (optional)",
+    placeholder="z.B. MUV2.DE",
+    help="Falls WKN-Suche fehlschlägt: Yahoo-Finance-Ticker direkt eingeben"
 ).strip().upper()
 
 st.sidebar.markdown("---")
@@ -958,18 +1276,24 @@ if st.sidebar.button("+ Aktuelle WKN merken") and wkn_input:
         st.session_state.watchlist.append(wkn_input)
 
 if start:
-    if not wkn_input or len(wkn_input) < 4:
-        st.error("Bitte eine gültige WKN eingeben (z.B. 843002 für Munich Re).")
-        st.stop()
-
-    with st.spinner(f"Suche Ticker für WKN {wkn_input} ..."):
-        ticker, gefundener_name = wkn_zu_ticker(wkn_input)
-
-    if not ticker:
-        st.error(f"Kein Ticker für WKN **{wkn_input}** gefunden. Bitte WKN prüfen.")
-        st.stop()
-
-    st.info(f"WKN **{wkn_input}** → **{ticker}** ({gefundener_name})")
+    # ── Ticker bestimmen ──────────────────────────────────────────────────────
+    if ticker_override:
+        ticker = ticker_override
+        gefundener_name = ticker_override
+        st.info(f"Ticker manuell gesetzt: **{ticker}**")
+    else:
+        if not wkn_input or len(wkn_input) < 4:
+            st.error("Bitte eine gültige WKN (z.B. 843002) oder Ticker (z.B. MUV2.DE) eingeben.")
+            st.stop()
+        with st.spinner(f"Suche Ticker für WKN {wkn_input} ..."):
+            ticker, gefundener_name = wkn_zu_ticker(wkn_input)
+        if not ticker:
+            st.error(
+                f"Kein Ticker für WKN **{wkn_input}** gefunden.\n\n"
+                f"**Tipp:** WKN prüfen (Munich Re = 843002) oder Ticker direkt im Feld 'Ticker manuell' eingeben (z.B. MUV2.DE)."
+            )
+            st.stop()
+        st.info(f"WKN **{wkn_input}** → **{ticker}** ({gefundener_name})")
 
     with st.spinner("Lade Marktdaten..."):
         df_raw, divs, meta = lade_daten(ticker, "5y")
@@ -1228,8 +1552,52 @@ if start:
         rsi=rsi, sma20=sma20, sma50=sma50, sma200=sma200_val, macd_h=macd_h, dv=dv, score=score,
     ))
 
+    # ── PDF DOWNLOAD ──────────────────────────────────────────────────────────
     st.markdown("---")
+    st.subheader("📄 Analyse als PDF herunterladen")
+    st.caption("Kompakte Ein-Seiter-Zusammenfassung mit allen Kerndaten, Prognose, Risiko-Plan und technischer Einschätzung.")
 
+    with st.spinner("Erstelle PDF..."):
+        pdf_buffer = generate_pdf_report(
+            name=meta.get("name", ticker),
+            ticker=ticker,
+            preis=preis,
+            sektor=meta.get("sector", "-"),
+            gwkt6=gwkt6,
+            gwkt1=gwkt1,
+            g6tot=g6tot,
+            g1tot=g1tot,
+            sl=sl,
+            rp=rp,
+            rvmax=rvmax,
+            nakt=nakt,
+            inv=inv,
+            k6=k6,
+            k1=k1,
+            dv=dv,
+            ana=ana,
+            score=score,
+            timing=timing,
+            rsi=rsi,
+            sma20=sma20,
+            sma50=sma50,
+            sma200=sma200_val,
+            mu=mu,
+            sigma=sigma,
+            acc=acc,
+            prob=prob,
+        )
+
+    dateiname = f"{ticker.replace('.','_')}_{pd.Timestamp.now().strftime('%Y%m%d')}_Analyse.pdf"
+    st.download_button(
+        label="⬇️  PDF herunterladen",
+        data=pdf_buffer,
+        file_name=dateiname,
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+    st.markdown("---")
     st.subheader("📊 Technische Analyse")
     st.plotly_chart(chart_tech(df, ticker), use_container_width=True)
 
